@@ -37,6 +37,7 @@ def main(bot,config):
             await bot.send(event, "已清理所有用户的对话记录")
         elif event.get("at") and event.get("at")[0]["qq"]==str(bot.id) or prefix_check(str(event.raw_message),config.api["llm"]["prefix"]):
             bot.logger.info(f"接受消息{event.processed_message}")
+            if '🦌' in event.raw_message:return
             user_info = await get_user(event.user_id, event.sender.nickname)
             if not user_info[6] >= config.controller["core"]["ai_reply_group"]:
                 await bot.send(event,"你没有足够的权限使用该功能哦~")

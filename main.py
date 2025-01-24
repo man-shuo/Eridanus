@@ -1,5 +1,6 @@
 import os
 import sys
+
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from plugins.core.yamlLoader import YAMLManager
@@ -27,6 +28,18 @@ from run.acg_infromation import galgame,bangumi
 from run.groupManager import group_manager, self_Manager, wifeyouwant, nailong_get
 from run.streaming_media import youtube,bilibili,Link_parsing
 
+
+
+
+from run import SDU_elect_check,manshuo_test,arcaea
+SDU_elect_check.main(bot,config)
+arcaea.main(bot,config)
+manshuo_test.main(bot,config)
+
+
+
+
+
 aiDraw.main(bot,config) #加载aiDraw插件
 basic_plugin.main(bot,config) #加载basic_plusine插件
 resource_search.main(bot,config) #加载资源搜索插件
@@ -45,7 +58,7 @@ bilibili.main(bot, config) #加载bilibili插件
 Link_parsing.main(bot, config)
 
 #以下为游戏相关
-blue_archive.main(bot, config) #加载blue_archive插件
+#blue_archive.main(bot, config) #加载blue_archive插件
 #奶龙检测
 try:
     if config.settings["抽象检测"]["奶龙检测"] or config.settings["抽象检测"]["doro检测"]:

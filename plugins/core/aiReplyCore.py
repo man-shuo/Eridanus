@@ -21,7 +21,7 @@ logger=get_logger()
 async def judge_trigger(processed_message,user_id,config,tools=None,bot=None,event=None,system_instruction=None,func_result=False):
     trigger = False
     if event.user_id in last_trigger_time:
-        bot.logger.info(f"last_trigger_time: {last_trigger_time.get(event.user_id)}")
+        #bot.logger.info(f"last_trigger_time: {last_trigger_time.get(event.user_id)}")
         if (time.time() - last_trigger_time.get(event.user_id)) <= config.api["llm"]["focus_time"]:
             trigger = True
         else:

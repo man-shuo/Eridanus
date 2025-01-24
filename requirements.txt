@@ -21,3 +21,11 @@ PicImageSearch
 numpy
 pydub
 httpx<0.28.0
+requests
+matplotlib
+PyExecJS
+requests
+requests
+matplotlib
+PyExecJS
+requests

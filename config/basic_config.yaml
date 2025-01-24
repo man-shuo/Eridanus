@@ -1,8 +1,8 @@
 bot:
-  name: "Eridanus"
+  name: "枫与岚"
 master:
-  name: "主人"
-  id: 1840094972
+  name: "漫朔"
+  id: 1270858640
 adapter:
   access_token: "any_access_token" #onebot实现部分为空/默认，一般不用改
   ws_client:

@@ -1,0 +1,11 @@
+/run/manshuo_test.py
+/run/SDU_elect_check.py
+/run/arcaea.py
+/data/pictures/wife_you_want_img/manshuo.jpg
+/data/pictures/wife_you_want_img/manshuo2.jpg
+/plugins/resource_search_plugin/Link_parsing/user_data.json
+/data/dataBase/conversation.db
+/data/dataBase/user_management.db
+/data/dataBase/wifeyouwant.db
+/data/censor/censor_user.yaml
+/data/media_service/bilibili/bili_dynamic.yaml
