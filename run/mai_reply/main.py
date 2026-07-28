@@ -335,6 +335,10 @@ def main(bot: ExtendBot, config: YAMLManager):
             if not config.mai_reply.config["trigger_llm"]["enable"]:
                 await add_to_context()
                 return
+            ignore_prefixes = config.mai_reply.config["trigger_llm"].get("ignore_prefixes", [])
+            if any(text.strip().startswith(p) for p in ignore_prefixes if p):
+                await add_to_context()
+                return
             if config.mai_reply.config["trigger_llm"]["whitelist_enabled"]:
                 if event.group_id not in config.mai_reply.config["trigger_llm"]["whitelist"]:
                     await add_to_context()
