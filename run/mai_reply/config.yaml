@@ -10,8 +10,10 @@ llm:
       - xxx
     model: gemini-2.5-pro
     base_url: http://api.apollodorus.xyz/v1   #可以去我们的开发群1050663831获取免费apikey。
+    no_extra_paramters: False #启用后下边的参数都不会传入。适配各种中转
     temperature: 1.1
-    max_tokens: 1024
+    max_tokens: 1024   #openai新版用的是max_completion_tokens，当max_completion_tokens配置项不为0时，自动使用max_completion_tokens
+    max_completion_tokens: 0
     enable_official_sdk: false   # false=直接发post，true=用openai sdk
 
   gemini:
@@ -32,11 +34,14 @@ trigger_llm:   #ai判断是否触发
   enable: true
   api_key: ""
   base_url: "http://api.apollodorus.xyz/v1"   # 可以去我们的开发群1050663831获取免费apikey。
-  model: "grok-4"                # 填入你用于判断的廉价/快速模型
+  model: "gpt-4o-mini"                # 填入你用于判断的廉价/快速模型
   stream: True
   whitelist_enabled: true  # 是否启用白名单模式，启用后只有在白名单中的群聊才会触发ai回复
   whitelist:
     - 1050663831
+  ignore_prefixes:  # 以这些字符串开头的消息将跳过 trigger_llm 判断，不触发AI回复流程
+    - "/"
+    - "#"
   reply_max_chars: 25 #插嘴最多回复字数
   reply_max_segments: 2 #插嘴最多回几句
 
@@ -63,10 +68,10 @@ context: # 上下文相关配置
   group_reply_impression_count: 3 #群聊回复时调用其他n个用户印象
   group_trigger_msgs: 10 #群聊印象更新间隔
   group_max_chars: 600 #群聊印象最大字数
-  img_context: false   # 已几乎弃用。读取上下文中的图片（需要模型能看图，会极大增加token消耗，仅在trigger_llm的白名单群启用）
+  img_context: false   # 已弃用，别开。
   vision_base_url: "http://api.apollodorus.xyz/v1"  # 视觉模型接口URL，留空则使用llm配置中的base_url
   vision_api_key: "xxxxx"  # 视觉模型API
-  vision_model: "grok-4"  # 能读图的模型
+  vision_model: "gpt-4o-mini"  # 能读图的模型
   vision_enable_group:
     - 1050663831  # 启用图像上下文的群聊ID列表
   anti_nsfw:
