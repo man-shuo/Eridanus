@@ -191,7 +191,7 @@ def main(bot: ExtendBot, config: YAMLManager):
                         if should_proactively_message(history, hour, cfg):
                             prompt = build_proactive_prompt(engine.context, uid, "用户通常空闲的时段", int(cfg.get("max_idle_days", 7)))
                             if prompt:
-                                event = type("ProactiveEvent", (), {"user_id": uid, "group_id": None})()
+                                event = type("PrivateMessageEvent", (), {"user_id": uid})()
                                 await engine.handle(bot, event, prompt)
                                 await asyncio.sleep(6)
                 await asyncio.sleep(int(cfg.get("interval_minutes", 30)) * 60)
