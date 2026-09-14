@@ -108,19 +108,23 @@ async def call_asmr(bot,event,config,try_again=False,mode="random"):
             else:
                 await bot.send(event,[Text(f"随机asmr\n标题: {r['title']}\nnsfw: {r['nsfw']}\n源: {r['source_url']}"), Image(file=img)])
             file_paths=[]
-            main_path = f"data/voice/cache/{r['title']}.{r['media_urls'][0][1].split('.')[-1]}"
+            safe_title = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', r['title']).strip('. ')
+            ext = r['media_urls'][0][1].split('.')[-1].split('?')[0]
+            main_path = f"data/voice/cache/{safe_title}.{ext}"
 
-            metype = r['media_urls'][0][1].split('.')[-1]
+            metype = ext
 
             for i in r['media_urls']:
-                if i[1].split('.')[-1] != metype or len(file_paths) >= config.resource_collector.config["asmr"]["max_merge_file_num"]:
-                    bot.logger.error(f"audio type change:{i[1]}")
+                clean_name = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', i[1]).strip('. ')
+                i_ext = clean_name.split('.')[-1].split('?')[0]
+                if i_ext != metype or len(file_paths) >= config.resource_collector.config["asmr"]["max_merge_file_num"]:
+                    bot.logger.error(f"audio type change:{clean_name}")
                     break
                 if config.resource_collector.config["asmr"]["with_file"]:
-                    path=f"data/voice/cache/{i[1]}"
+                    path=f"data/voice/cache/{clean_name}"
                     file=await download_file(i[0],path,config.common_config.basic_config["proxy"]["http_proxy"])
                     file_paths.append(file)
-                text=f"音频名称: {i[1]}\n音频url: {i[0]}"
+                text=f"音频名称: {clean_name}\n音频url: {i[0]}"
                 forward_list.append(Node(content=[Text(text)]))
             if config.resource_collector.config["asmr"]["with_url"]:
                 await bot.send(event, forward_list)
@@ -503,8 +507,8 @@ async def jm_download(bot,event,config,comic_id):
                     if config.resource_collector.config["JMComic"]["autoEncrypt"]:
                         await bot.send(event, msg_pdf)
                     await delay_recall(bot, msg)
-            bot.logger.info("移除预览缓存")
-            operating.pop(comic_id)
+            bot.logger.info("移除下载任务缓存")
+            operating.pop(comic_id, None)
             if config.resource_collector.config['JMComic']["autoClearPDF"]:
                 await wait_and_delete_file(
                     bot,
