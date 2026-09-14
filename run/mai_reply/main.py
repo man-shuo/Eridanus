@@ -34,7 +34,7 @@ from run.mai_reply.service.proactive import build_proactive_prompt, should_proac
 
 from PIL import Image as PILImage
 
-from developTools.event.events import GroupMessageEvent, PrivateMessageEvent, LifecycleMetaEvent
+from developTools.event.events import GroupMessageEvent, PrivateMessageEvent, LifecycleMetaEvent, Sender
 from developTools.message.message_components import Text, Image, Mface, At, Reply
 from framework_common.framework_util.websocket_fix import ExtendBot
 from framework_common.framework_util.yamlLoader import YAMLManager
@@ -191,7 +191,22 @@ def main(bot: ExtendBot, config: YAMLManager):
                         if should_proactively_message(history, hour, cfg):
                             prompt = build_proactive_prompt(engine.context, uid, "用户通常空闲的时段", int(cfg.get("max_idle_days", 7)))
                             if prompt:
-                                event = type("PrivateMessageEvent", (), {"user_id": uid})()
+                                event = PrivateMessageEvent(
+                                    post_type="message",
+                                    sub_type="friend",
+                                    user_id=uid,
+                                    message_type="private",
+                                    message_id=0,
+                                    message=[],
+                                    raw_message="",
+                                    font=0,
+                                    sender=Sender(
+                                        user_id=uid,
+                                        nickname="",
+                                    ),
+                                    to_me=False,
+                                    group_id=None,
+                                )
                                 await engine.handle(bot, event, prompt)
                                 await asyncio.sleep(6)
                 await asyncio.sleep(int(cfg.get("interval_minutes", 30)) * 60)
