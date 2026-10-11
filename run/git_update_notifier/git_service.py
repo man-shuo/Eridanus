@@ -37,7 +37,7 @@ class GitService:
             )
             return res.returncode, res.stdout.strip(), res.stderr.strip()
         except subprocess.TimeoutExpired:
-            return -1, "", f"Git command timed out after {timeout}s: git {' '.join(args)}"
+            return -1, "", f"Git 命令超时（{timeout}秒）: git {' '.join(args)}"
         except Exception as e:
             return -1, "", str(e)
 
@@ -64,7 +64,7 @@ class GitService:
         if code == 0:
             return True, out
         else:
-            logger.warning(f"git fetch {remote} {branch} failed: {err}, trying git fetch {remote}")
+            logger.warning(f"git fetch {remote} {branch} 失败: {err}，尝试直接 git fetch {remote}")
             c2, o2, e2 = await self.run_git(["fetch", remote], timeout=timeout)
             if c2 == 0:
                 return True, o2
@@ -87,7 +87,7 @@ class GitService:
         if not fetch_ok:
             return {
                 "success": False,
-                "error": f"git fetch failed: {fetch_msg}",
+                "error": f"拉取远程分支失败: {fetch_msg}",
                 "is_ahead": False,
                 "ahead_count": 0,
                 "local_commit": local_commit,
@@ -106,7 +106,7 @@ class GitService:
             else:
                 return {
                     "success": False,
-                    "error": f"Cannot resolve {remote_ref} or FETCH_HEAD",
+                    "error": f"无法解析远程引用 {remote_ref} 或 FETCH_HEAD",
                     "is_ahead": False,
                     "ahead_count": 0,
                     "local_commit": local_commit,
@@ -125,7 +125,7 @@ class GitService:
         diff_stat = ""
 
         if is_ahead:
-            # 1. ??????
+            # 1. 提交摘要简要列表
             _, commit_list, _ = await self.run_git([
                 "log",
                 f"HEAD..{remote_ref}",
@@ -134,7 +134,7 @@ class GitService:
                 f"-n{max_commits}",
             ])
 
-            # 2. ??????? commit ?????????????/????? commit id, ??, ??, ??, ?????
+            # 2. 详细包含每个 commit 的变动内容、提交人与说明
             _, raw_log, _ = await self.run_git([
                 "log",
                 f"HEAD..{remote_ref}",
@@ -147,7 +147,7 @@ class GitService:
             parts = [p.strip() for p in raw_log.split("===COMMIT_SPLIT===") if p.strip()]
             commit_details = "\n\n".join(parts)
 
-            # 3. ??????
+            # 3. 统计变动文件
             _, diff_stat, _ = await self.run_git([
                 "diff",
                 "--stat",
@@ -175,7 +175,7 @@ class GitService:
             with open(self.state_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            logger.warning(f"Failed to read state file {self.state_file}: {e}")
+            logger.warning(f"读取状态文件 {self.state_file} 失败: {e}")
             return {}
 
     def save_state(self, state: Dict[str, Any]) -> None:
@@ -183,7 +183,7 @@ class GitService:
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.warning(f"Failed to save state file {self.state_file}: {e}")
+            logger.warning(f"保存状态文件 {self.state_file} 失败: {e}")
 
     def is_notified(self, remote_commit: str) -> bool:
         if not remote_commit:

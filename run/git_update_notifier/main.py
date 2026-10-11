@@ -57,19 +57,19 @@ async def send_to_master(bot: ExtendBot, master_id: int, message: str):
     try:
         await bot.send_friend_message(master_id, message)
     except Exception as e:
-        logger.error(f"[GitNotifier] ? master ({master_id}) ????????: {e}")
+        logger.error(f"[GitNotifier] 向 master ({master_id}) 发送通知失败: {e}")
 
 
 async def report_update_via_mai_reply(bot: ExtendBot, config, master_id: int, update_info: Dict[str, Any]) -> bool:
     try:
         mai_cfg = getattr(config, "mai_reply", None)
         if not mai_cfg:
-            logger.info("[GitNotifier] mai_reply ?????????????")
+            logger.info("[GitNotifier] mai_reply 插件未找到，回退到普通文本播报")
             return False
 
         mai_dict = getattr(mai_cfg, "config", {})
         if not isinstance(mai_dict, dict) or not mai_dict.get("enable", False):
-            logger.info("[GitNotifier] mai_reply ???????????")
+            logger.info("[GitNotifier] mai_reply 未启用，回退到普通文本播报")
             return False
 
         from run.mai_reply.service.reply_engine import ReplyEngine
@@ -79,38 +79,37 @@ async def report_update_via_mai_reply(bot: ExtendBot, config, master_id: int, up
         event.user_id = int(master_id)
 
         prompt = (
-            f"????????? Git ??????????/???????\n"
-            f"?????{update_info['branch']}\n"
-            f"??????????????? {update_info['ahead_count']} ? commit\n"
-            f"???????{update_info['remote_commit'][:8]}\n\n"
-            f"???????? Commit ??????????????????????? commit??\n"
+            f"【系统重要通知：远程 Git 仓库检测到新更新/新功能发布】\n"
+            f"目标分支：{update_info['branch']}\n"
+            f"远程仓库领先当前版本共 {update_info['ahead_count']} 个提交 (commit)\n"
+            f"最新提交哈希：{update_info['remote_commit'][:8]}\n\n"
+            f"以下是新提交的详细记录：\n"
             f"{update_info['commit_details']}\n\n"
-            f"???????????\n{update_info['diff_stat']}\n\n"
-            f"????? - ?????????\n"
-            f"?????????????????????????Master??????????\n"
-            f"1. ????????????????????????????????????? {update_info['ahead_count']} ? commit??\n"
-            f"2. ??????????????????????? commit ???????\n"
-            f"   - ?????? commit????????????? commit ????????????? bug??????????????????\n"
-            f"   - ??????????????????????? log???????????????? commit ??????\n"
-            f"3. ???????????????????????? git pull ?????????"
+            f"文件变动总体统计：\n{update_info['diff_stat']}\n\n"
+            f"【你的任务 - 专属更新汇报】\n"
+            f"请以你的性格与口吻，向你的管理员（Master）汇报这次更新的亮点：\n"
+            f"1. 兴奋或关切地告知 Master 仓库有了最新更新（领先了 {update_info['ahead_count']} 个提交）；\n"
+            f"2. 详细梳理并说明这些提交都干了什么（重点说明新增了什么功能、优化或修复了哪些问题，让管理员一目了然）；\n"
+            f"   - 如果包含多个 commit，请条理清晰地列出主要更新内容；\n"
+            f"3. 贴心提醒管理员直接运行根目录下的【更新脚本.bat】就可以一键完成更新，不需要任何复杂的代码或 git 命令操作。"
         )
 
-        logger.info(f"[GitNotifier] ???? mai_reply ????? master ({master_id}) ?????? {update_info['ahead_count']} ? commit?...")
+        logger.info(f"[GitNotifier] 正在调用 mai_reply 向管理员 master ({master_id}) 生成更新播报 (包含 {update_info['ahead_count']} 个提交)...")
         await engine.handle(bot, event, prompt)
         return True
 
     except Exception as e:
-        logger.error(f"[GitNotifier] ?? mai_reply ??????: {e}", exc_info=True)
+        logger.error(f"[GitNotifier] 调用 mai_reply 生成播报失败: {e}", exc_info=True)
         return False
 
 
 async def report_update_fallback(bot: ExtendBot, config, master_id: int, update_info: Dict[str, Any]):
     structured_msg = (
-        f"?? ?Git ???????\n"
-        f"???????????: {update_info['branch']}??? {update_info['ahead_count']} ? commit?\n\n"
-        f"?????????\n{update_info['commit_details']}\n\n"
-        f"?????????\n{update_info['diff_stat']}\n\n"
-        f"?? ????????? git pull ??????????????"
+        f"📢 【Git 仓库更新提醒】\n"
+        f"检测到远程仓库 [{update_info['branch']}] 分支有 {update_info['ahead_count']} 个新提交！\n\n"
+        f"【更新提交详情】\n{update_info['commit_details']}\n\n"
+        f"【修改文件统计】\n{update_info['diff_stat']}\n\n"
+        f"💡 提醒：你可以直接运行根目录下的【更新脚本.bat】进行一键更新~"
     )
     await send_to_master(bot, master_id, structured_msg)
 
@@ -132,7 +131,7 @@ async def perform_update_check(
 
     master_id = _get_master_id(config, plugin_cfg)
 
-    logger.info(f"[GitNotifier] ?????? Git ???remote={remote}, branch={branch}?...")
+    logger.info(f"[GitNotifier] 正在检查远程 Git 仓库 (remote={remote}, branch={branch})...")
     update_info = await git_service.check_updates(
         remote=remote,
         branch=branch,
@@ -141,21 +140,21 @@ async def perform_update_check(
     )
 
     if not update_info["success"]:
-        logger.error(f"[GitNotifier] ??????: {update_info['error']}")
+        logger.error(f"[GitNotifier] 检查更新失败: {update_info['error']}")
         return update_info
 
     if not update_info["is_ahead"]:
-        logger.info(f"[GitNotifier] ????????????????/???? {update_info['local_commit'][:8]}?")
+        logger.info(f"[GitNotifier] 当前已是最新版本，本地与远程一致 (最新提交: {update_info['local_commit'][:8]})")
         return update_info
 
     ahead_count = update_info["ahead_count"]
     remote_commit = update_info["remote_commit"]
     logger.info(
-        f"[GitNotifier] ??????????????? {ahead_count} ? commit (?? commit: {remote_commit[:8]})"
+        f"[GitNotifier] 发现远程仓库领先 {ahead_count} 个提交 (最新远程 commit: {remote_commit[:8]})"
     )
 
     if not force_notify and git_service.is_notified(remote_commit):
-        logger.info(f"[GitNotifier] ? commit {remote_commit[:8]} ??????????????")
+        logger.info(f"[GitNotifier] 远程 commit {remote_commit[:8]} 已在之前通知过管理员，跳过重复提醒")
         return update_info
 
     if notify_master and master_id:
@@ -176,14 +175,14 @@ async def git_monitor_loop(bot: ExtendBot, config, git_service: GitService):
     initial_delay = float(plugin_cfg.get("initial_delay", 20))
     check_interval = float(plugin_cfg.get("check_interval", 1800))
 
-    logger.info(f"[GitNotifier] ???????????? {initial_delay} ????????????? {check_interval} ?")
+    logger.info(f"[GitNotifier] 定时监控协程已启动，将在 {initial_delay} 秒后首次检查，之后每 {check_interval} 秒检查一次")
     await asyncio.sleep(initial_delay)
 
     while True:
         try:
             current_cfg = _get_plugin_config(config)
             if not current_cfg.get("enable", True):
-                logger.info("[GitNotifier] ?????????????")
+                logger.info("[GitNotifier] 插件已被禁用，跳过检查")
                 await asyncio.sleep(60)
                 continue
 
@@ -191,17 +190,17 @@ async def git_monitor_loop(bot: ExtendBot, config, git_service: GitService):
             await perform_update_check(bot, config, git_service, is_manual=False)
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
-            logger.info("[GitNotifier] ?????????")
+            logger.info("[GitNotifier] 监控协程被取消退出")
             break
         except Exception as e:
-            logger.error(f"[GitNotifier] ??????: {e}", exc_info=True)
+            logger.error(f"[GitNotifier] 监控循环异常: {e}", exc_info=True)
             await asyncio.sleep(60)
 
 
 def main(bot: ExtendBot, config):
     plugin_cfg = _get_plugin_config(config)
     if not plugin_cfg.get("enable", True):
-        bot.logger.info("[GitNotifier] ????? (enable=false)")
+        bot.logger.info("[GitNotifier] 插件未启用 (enable=false)")
         return
 
     git_service = GitService()
@@ -214,7 +213,7 @@ def main(bot: ExtendBot, config):
             return
         _loop_started = True
         _bg_task = asyncio.create_task(git_monitor_loop(bot, config, git_service))
-        bot.logger.info("[GitNotifier] ?????????????")
+        bot.logger.info("[GitNotifier] 定时检查远程仓库任务已投入运行")
 
     @bot.on(LifecycleMetaEvent)
     async def on_lifecycle(event: LifecycleMetaEvent):
@@ -231,7 +230,7 @@ def main(bot: ExtendBot, config):
     @bot.on(PrivateMessageEvent)
     async def handle_git_commands(event: GroupMessageEvent | PrivateMessageEvent):
         text = (getattr(event, "pure_text", "") or "").strip()
-        command_list = ["/git check", "/git status", "????", "????", "/check_update"]
+        command_list = ["/git check", "/git status", "检查更新", "查看更新", "/check_update"]
         if text not in command_list:
             return
 
@@ -239,10 +238,10 @@ def main(bot: ExtendBot, config):
         master_id = _get_master_id(config, current_cfg)
 
         if event.user_id != master_id:
-            await bot.send(event, [Text("?????????Master?????? Git ?????~")])
+            await bot.send(event, [Text("只有机器人的管理员（Master）才可以执行检查更新指令哦~")])
             return
 
-        await bot.send(event, [Text("?????? Git ????????????...")])
+        await bot.send(event, [Text("正在检查远程仓库更新状态，请稍候...")])
 
         try:
             update_info = await perform_update_check(
@@ -250,21 +249,21 @@ def main(bot: ExtendBot, config):
             )
 
             if not update_info["success"]:
-                await bot.send(event, [Text(f"? ???????\n{update_info['error']}")])
+                await bot.send(event, [Text(f"❌ 检查更新失败：\n{update_info['error']}")])
                 return
 
             if not update_info["is_ahead"]:
                 if current_cfg.get("notify_up_to_date_on_manual", True):
                     await bot.send(
                         event,
-                        [Text(f"? ?????????????\n??: {update_info['branch']}\n????: {update_info['local_commit'][:8]}\n?????????")]
+                        [Text(f"✅ 当前已是最新版本！\n分支：{update_info['branch']}\n最新提交：{update_info['local_commit'][:8]}\n暂无需要更新的内容。")]
                     )
             else:
                 await bot.send(
                     event,
-                    [Text(f"?? ?????? {update_info['branch']} ?? {update_info['ahead_count']} ? commit???????????????????? Master...")]
+                    [Text(f"✨ 发现远程分支 {update_info['branch']} 领先 {update_info['ahead_count']} 个提交！已开始生成详细更新汇报通知 Master...")]
                 )
 
         except Exception as e:
-            bot.logger.error(f"[GitNotifier] ????????: {e}", exc_info=True)
-            await bot.send(event, [Text(f"? ????: {e}")])
+            bot.logger.error(f"[GitNotifier] 手动检查更新异常: {e}", exc_info=True)
+            await bot.send(event, [Text(f"❌ 检查时发生错误: {e}")])
