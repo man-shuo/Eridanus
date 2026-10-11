@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import sys
 import base64
 import datetime
 import json
@@ -44,20 +45,198 @@ def calc_bkn(p_skey: str) -> int:
 
 
 # -------------------------------------------------------------
-# 跨热重载全局单例生命周期管理
+# 跨热重载全局单例生命周期与运行态管理
 # -------------------------------------------------------------
 _GLOBAL_QZONE_INSTANCE = None
+
+
+def _get_runtime_state() -> dict:
+    """获取进程级单例运行时状态字典，热重载或跨模块调用时共享"""
+    if not hasattr(sys, "_qzone_runtime_state") or not isinstance(sys._qzone_runtime_state, dict):
+        sys._qzone_runtime_state = {
+            "active_instance": None,
+            "bg_started": False,
+            "in_progress_comments": set(),
+            "replied_comment_ids_cache": None,
+            "task_history_cache": None,
+            "send_lock": None,
+            "comment_reply_lock": None,
+            "bg_start_lock": None,
+            "bot_loop": None,
+        }
+    return sys._qzone_runtime_state
+
+
+def _get_lock(lock_key: str) -> asyncio.Lock:
+    """获取或初始化绑定在当前运行事件循环上的共享异步锁"""
+    state = _get_runtime_state()
+    lock = state.get(lock_key)
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = state.get("bot_loop")
+
+    if lock is None:
+        lock = asyncio.Lock()
+        state[lock_key] = lock
+    else:
+        lock_loop = getattr(lock, "_loop", None)
+        if lock_loop is not None and lock_loop.is_closed():
+            lock = asyncio.Lock()
+            state[lock_key] = lock
+        elif lock_loop is not None and current_loop is not None and lock_loop is not current_loop:
+            lock = asyncio.Lock()
+            state[lock_key] = lock
+    return lock
+
+
+class QzoneLifecycleManager:
+    """QQ空间后台任务与调度器生命周期管理器"""
+
+    def __init__(self, bot_loop=None, logger=None):
+        self.bot_loop = bot_loop
+        self.logger = logger
+        self.scheduler: Optional[AsyncIOScheduler] = None
+        self.background_tasks: list = []
+        self.last_scheduled_execution: dict = {}
+        self.stopped = False
+
+    @property
+    def send_lock(self) -> asyncio.Lock:
+        return _get_lock("send_lock")
+
+    @property
+    def comment_reply_lock(self) -> asyncio.Lock:
+        return _get_lock("comment_reply_lock")
+
+    @property
+    def in_progress_comments(self) -> set:
+        return _get_runtime_state()["in_progress_comments"]
+
+    async def stop(self):
+        if self.stopped:
+            return
+        self.stopped = True
+        log = self.logger
+        if log:
+            log.info("[Qzone 生命周期] 开始停止旧实例后台服务...")
+        else:
+            print("[Qzone 生命周期] 开始停止旧实例后台服务...")
+
+        if self.scheduler:
+            try:
+                if self.scheduler.running:
+                    self.scheduler.shutdown(wait=False)
+                    if log:
+                        log.info("[Qzone 生命周期] 旧调度器已停止")
+            except Exception as e:
+                if log:
+                    log.warning(f"[Qzone 生命周期] 停止旧调度器异常: {e}")
+
+        tasks_to_cancel = list(self.background_tasks)
+        self.background_tasks.clear()
+        for t in tasks_to_cancel:
+            try:
+                if not t.done():
+                    t.cancel()
+            except Exception:
+                pass
+        if tasks_to_cancel:
+            try:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            except Exception:
+                pass
+
+        # 同步更新全局运行标记
+        state = _get_runtime_state()
+        if state.get("active_instance") is self:
+            state["active_instance"] = None
+            state["bg_started"] = False
+
+        if log:
+            log.info("[Qzone 生命周期] 旧后台监控协程已全部取消")
+
+    def stop_threadsafe(self):
+        """跨线程安全同步停止（应对 PluginManager 线程池中执行 main 时旧实例的清理）"""
+        if self.stopped:
+            return
+
+        # 1. 尝试直接停掉 scheduler
+        if self.scheduler:
+            try:
+                if self.scheduler.running:
+                    self.scheduler.shutdown(wait=False)
+            except Exception as e:
+                print(f"[Qzone 生命周期] 跨线程停止旧调度器异常: {e}")
+
+        # 2. 取消旧协程任务
+        loop = self.bot_loop
+        if not loop or loop.is_closed():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+        if loop and loop.is_running():
+            try:
+                try:
+                    current_running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    current_running_loop = None
+
+                if current_running_loop is loop:
+                    for t in list(self.background_tasks):
+                        try:
+                            if not t.done():
+                                t.cancel()
+                        except Exception:
+                            pass
+                    self.background_tasks.clear()
+                    self.stopped = True
+                else:
+                    fut = asyncio.run_coroutine_threadsafe(self.stop(), loop)
+                    fut.result(timeout=5)
+            except Exception as e:
+                print(f"[Qzone 生命周期] 跨线程调度 stop() 异常: {e}")
+                for t in list(self.background_tasks):
+                    try:
+                        if not t.done():
+                            loop.call_soon_threadsafe(t.cancel)
+                    except Exception:
+                        pass
+                self.stopped = True
+        else:
+            for t in list(self.background_tasks):
+                try:
+                    if not t.done():
+                        t.cancel()
+                except Exception:
+                    pass
+            self.background_tasks.clear()
+            self.stopped = True
+
+        state = _get_runtime_state()
+        if state.get("active_instance") is self:
+            state["active_instance"] = None
+            state["bg_started"] = False
 
 
 async def plugin_cleanup():
     """供框架 unload_plugin 或热重载前调用的清理钩子"""
     global _GLOBAL_QZONE_INSTANCE
-    if _GLOBAL_QZONE_INSTANCE:
+    runtime_state = _get_runtime_state()
+    active_inst = runtime_state.get("active_instance") or _GLOBAL_QZONE_INSTANCE
+    if active_inst:
         try:
-            await _GLOBAL_QZONE_INSTANCE.stop()
+            await active_inst.stop()
         except Exception as e:
             print(f"[Qzone] plugin_cleanup 清理异常: {e}")
-        _GLOBAL_QZONE_INSTANCE = None
+    runtime_state["active_instance"] = None
+    runtime_state["bg_started"] = False
+    in_prog = runtime_state.get("in_progress_comments")
+    if isinstance(in_prog, set):
+        in_prog.clear()
+    _GLOBAL_QZONE_INSTANCE = None
 
 
 def main(bot: ExtendBot, config: YAMLManager):
@@ -74,50 +253,27 @@ def main(bot: ExtendBot, config: YAMLManager):
     # ---------------------------------------------------------
     global _GLOBAL_QZONE_INSTANCE
 
-    class QzoneLifecycleManager:
-        def __init__(self):
-            self.scheduler = None
-            self.background_tasks = []
-            self.send_lock = asyncio.Lock()
-            self.comment_reply_lock = asyncio.Lock()
-            self.in_progress_comments = set()
-            self.last_scheduled_execution = {}
-            self.stopped = False
+    bot_loop = getattr(bot, "loop", None)
+    if bot_loop is None:
+        try:
+            bot_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            bot_loop = None
 
-        async def stop(self):
-            if self.stopped:
-                return
-            self.stopped = True
-            logger.info("[Qzone 生命周期] 开始停止旧实例后台服务...")
-            if self.scheduler:
-                try:
-                    if self.scheduler.running:
-                        self.scheduler.shutdown(wait=False)
-                        logger.info("[Qzone 生命周期] 旧调度器已停止")
-                except Exception as e:
-                    logger.warning(f"[Qzone 生命周期] 停止旧调度器异常: {e}")
-            for t in self.background_tasks:
-                try:
-                    if not t.done():
-                        t.cancel()
-                except Exception:
-                    pass
-            self.background_tasks.clear()
-            logger.info("[Qzone 生命周期] 旧后台监控协程已全部取消")
+    runtime_state = _get_runtime_state()
+    runtime_state["bot_loop"] = bot_loop
 
     # 若之前已有实例存活（例如非标准卸载场景），先优雅停止
-    if _GLOBAL_QZONE_INSTANCE:
+    old_instance = runtime_state.get("active_instance") or _GLOBAL_QZONE_INSTANCE
+    if old_instance:
         try:
             logger.warning("[Qzone] 检测到已存在运行中的旧 Qzone 实例，正在接管并停止旧任务...")
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.create_task(_GLOBAL_QZONE_INSTANCE.stop())
-            else:
-                loop.run_until_complete(_GLOBAL_QZONE_INSTANCE.stop())
+            old_instance.stop_threadsafe()
         except Exception as e:
             logger.warning(f"[Qzone] 停止旧实例异常: {e}")
 
-    current_instance = QzoneLifecycleManager()
+    current_instance = QzoneLifecycleManager(bot_loop=bot_loop, logger=logger)
+    runtime_state["active_instance"] = current_instance
     _GLOBAL_QZONE_INSTANCE = current_instance
 
     # ---------------------------------------------------------
@@ -334,7 +490,8 @@ def main(bot: ExtendBot, config: YAMLManager):
     # ---------------------------------------------------------
     async def send_to_qzone(content: Optional[str] = None, pic_paths: Optional[list] = None):
         nonlocal login_result
-        async with current_instance.send_lock:
+        send_lock = _get_lock("send_lock")
+        async with send_lock:
             return await _send_to_qzone_locked(content, pic_paths)
 
     async def _send_to_qzone_locked(content: Optional[str] = None, pic_paths: Optional[list] = None):
@@ -604,8 +761,10 @@ def main(bot: ExtendBot, config: YAMLManager):
         interval = max(600, int(cookie_cfg.get("保活间隔_秒", 1800)))
         logger.info(f"[Qzone 保活] 启动温和保活监控，轮询间隔: {interval} 秒")
 
-        while True:
+        while not current_instance.stopped:
             await asyncio.sleep(interval)
+            if current_instance.stopped:
+                break
             try:
                 alive = await check_cookie_alive()
                 if alive:
@@ -910,17 +1069,27 @@ def main(bot: ExtendBot, config: YAMLManager):
         except Exception as e:
             logger.error(f"[Qzone] 保存任务执行历史失败: {e}")
 
-    current_instance.last_scheduled_execution = load_task_history()
+    def get_task_history() -> dict:
+        state = _get_runtime_state()
+        history = state.get("task_history_cache")
+        if history is None:
+            history = load_task_history()
+            state["task_history_cache"] = history
+        return history
+
+    current_instance.last_scheduled_execution = get_task_history()
 
     async def task_executor(task_name: str, task_info: dict):
         today_str = datetime.date.today().strftime("%Y-%m-%d")
-        last_date = current_instance.last_scheduled_execution.get(task_name)
+        history = get_task_history()
+        last_date = history.get(task_name)
         if last_date == today_str and not task_info.get("_force_test", False):
             logger.warning(f"[Qzone 任务] 定时任务 [{task_name}] 今日({today_str})已经执行过，跳过重复触发！")
             return
 
-        current_instance.last_scheduled_execution[task_name] = today_str
-        save_task_history(current_instance.last_scheduled_execution)
+        history[task_name] = today_str
+        current_instance.last_scheduled_execution = history
+        save_task_history(history)
 
         logger.info(f"[Qzone 任务] 开始执行定时发空间任务: {task_name}")
         bot_name, chara_text = get_bot_persona_info()
@@ -1253,8 +1422,10 @@ def main(bot: ExtendBot, config: YAMLManager):
             return
         interval_min = max(10, int(vcfg.get("巡检间隔_分钟", 60)))
         logger.info(f"[Qzone Vtuber日常] 启动日常巡检监控，轮询间隔: {interval_min} 分钟")
-        while True:
+        while not current_instance.stopped:
             await asyncio.sleep(interval_min * 60)
+            if current_instance.stopped:
+                break
             try:
                 await vtuber_daily_task()
             except Exception as e:
@@ -1334,17 +1505,34 @@ def main(bot: ExtendBot, config: YAMLManager):
         except Exception as e:
             logger.error(f"[Qzone] 保存评论回复缓存失败: {e}")
 
-    replied_comment_ids = load_replied_comments()
+    def get_replied_comment_ids() -> set:
+        state = _get_runtime_state()
+        cache = state.get("replied_comment_ids_cache")
+        if cache is None:
+            cache = load_replied_comments()
+            state["replied_comment_ids_cache"] = cache
+        return cache
+
+    replied_comment_ids = get_replied_comment_ids()
 
     async def check_and_reply_comments():
-        nonlocal login_result, replied_comment_ids
-        if current_instance.comment_reply_lock.locked():
+        nonlocal login_result
+        if current_instance.stopped:
             return
-        async with current_instance.comment_reply_lock:
+        state = _get_runtime_state()
+        if state.get("active_instance") is not current_instance:
+            return
+        reply_lock = _get_lock("comment_reply_lock")
+        if reply_lock.locked():
+            logger.debug("[Qzone 评论巡检] 评论回复锁已处于锁定中，跳过本次重入")
+            return
+        async with reply_lock:
             return await _check_and_reply_comments_locked()
 
     async def _check_and_reply_comments_locked():
-        nonlocal login_result, replied_comment_ids
+        nonlocal login_result
+        replied_comment_ids = get_replied_comment_ids()
+        in_prog = _get_runtime_state()["in_progress_comments"]
         if not login_result:
             await fetch_cookie_from_onebot()
         if not login_result:
@@ -1522,7 +1710,7 @@ def main(bot: ExtendBot, config: YAMLManager):
                     continue
                 root_cid = str(root_c.get("tid") or root_c.get("id") or "").strip()
                 unique_key = f"{tid}_sub_{root_cid}_{cid}" if is_sub else f"{tid}_root_{cid}"
-                if unique_key in replied_comment_ids or unique_key in current_instance.in_progress_comments:
+                if unique_key in replied_comment_ids or unique_key in in_prog:
                     continue
 
                 # 过滤超过3天的古早评论，直接记录已处理，避免反复打扰
@@ -1563,167 +1751,168 @@ def main(bot: ExtendBot, config: YAMLManager):
                         save_replied_comments(replied_comment_ids)
                         continue
 
-                parent_desc = ""
-                if is_sub:
-                    root_name = root_c.get("name") or root_c.get("nick") or "楼主"
-                    root_content = (root_c.get("content", "") or "").strip()
-                    root_content_clean = re.sub(r"@\{uin:\d+,nick:[^,}]+,who:\d+\}\s*", "", root_content).strip()
-                    if int(root_uid) == target_qq:
-                        parent_desc = f"该好友正在回复你在该说说下的留言：【{root_content_clean}】\n"
-                    else:
-                        parent_desc = f"该好友正在楼中楼针对评论【{root_name}：{root_content_clean}】进行互动回复\n"
+                # 核心防重：在启动 LLM 生成前立即前置占位，锁定该 unique_key，防止任何并发巡检或重入重复处理
+                in_prog.add(unique_key)
+                try:
+                    parent_desc = ""
+                    if is_sub:
+                        root_name = root_c.get("name") or root_c.get("nick") or "楼主"
+                        root_content = (root_c.get("content", "") or "").strip()
+                        root_content_clean = re.sub(r"@\{uin:\d+,nick:[^,}]+,who:\d+\}\s*", "", root_content).strip()
+                        if int(root_uid) == target_qq:
+                            parent_desc = f"该好友正在回复你在该说说下的留言：【{root_content_clean}】\n"
+                        else:
+                            parent_desc = f"该好友正在楼中楼针对评论【{root_name}：{root_content_clean}】进行互动回复\n"
 
-                logger.info(f"[Qzone 评论互动] 发现新{'子评论' if is_sub else '根评论'} 来自: {comment_name}({comment_uid}) -> {comment_content}")
+                    logger.info(f"[Qzone 评论互动] 发现新{'子评论' if is_sub else '根评论'} 来自: {comment_name}({comment_uid}) -> {comment_content}")
 
-                # 获取用户在 mai_reply 的对话历史与用户印象
-                user_impression = ""
-                recent_chat_snippet = ""
-                if mai_context:
-                    try:
-                        user_impression = mai_context.get_impression(int(comment_uid))
-                        pattern = f"*{comment_uid}*"
-                        keys = mai_context._ctx_keys(pattern)
-                        for k in keys:
-                            hist = mai_context._load_history(k)
-                            if hist:
-                                recent_lines = []
-                                for h in hist[-6:]:
-                                    role = "用户" if h.get("role") == "user" else bot_name
-                                    content_str = h.get("content", "")
-                                    if isinstance(content_str, str):
-                                        recent_lines.append(f"{role}: {content_str[:50]}")
-                                if recent_lines:
-                                    recent_chat_snippet = "\n".join(recent_lines)
-                                    break
-                    except Exception as e:
-                        logger.warning(f"[Qzone] 读取 mai_reply 对话上下文失败: {e}")
+                    # 获取用户在 mai_reply 的对话历史与用户印象
+                    user_impression = ""
+                    recent_chat_snippet = ""
+                    if mai_context:
+                        try:
+                            user_impression = mai_context.get_impression(int(comment_uid))
+                            pattern = f"*{comment_uid}*"
+                            keys = mai_context._ctx_keys(pattern)
+                            for k in keys:
+                                hist = mai_context._load_history(k)
+                                if hist:
+                                    recent_lines = []
+                                    for h in hist[-6:]:
+                                        role = "用户" if h.get("role") == "user" else bot_name
+                                        content_str = h.get("content", "")
+                                        if isinstance(content_str, str):
+                                            recent_lines.append(f"{role}: {content_str[:50]}")
+                                    if recent_lines:
+                                        recent_chat_snippet = "\n".join(recent_lines)
+                                        break
+                        except Exception as e:
+                            logger.warning(f"[Qzone] 读取 mai_reply 对话上下文失败: {e}")
 
-                # 同动态防车轱辘复读判定
-                all_prior_replies = existing_bot_replies + recent_replies_for_this_post
-                anti_repetition_prompt = ""
-                if all_prior_replies:
-                    prior_samples = all_prior_replies[-5:]
-                    anti_repetition_prompt = (
-                        "【防车轱辘复读警告（极度重要）】：你在本条说说下已经对其他好友做出过如下回复：\n"
-                        + "\n".join([f"- {r}" for r in prior_samples])
-                        + "\n⚠️ 本次回复【绝对严禁】再复读或变相复读上述任何相同的借口、解释理由、词汇或句式！针对当前好友必须换一个完全不同的角度、切入点或态度回应！\n"
+                    # 同动态防车轱辘复读判定
+                    all_prior_replies = existing_bot_replies + recent_replies_for_this_post
+                    anti_repetition_prompt = ""
+                    if all_prior_replies:
+                        prior_samples = all_prior_replies[-5:]
+                        anti_repetition_prompt = (
+                            "【防车轱辘复读警告（极度重要）】：你在本条说说下已经对其他好友做出过如下回复：\n"
+                            + "\n".join([f"- {r}" for r in prior_samples])
+                            + "\n⚠️ 本次回复【绝对严禁】再复读或变相复读上述任何相同的借口、解释理由、词汇或句式！针对当前好友必须换一个完全不同的角度、切入点或态度回应！\n"
+                        )
+
+                    # LLM 生成贴合人设与说说主题的回复（基于高阶对话原则与反套路动态检测，杜绝刻板模式化）
+                    sys_reply_prompt_base = (
+                        f"你是{bot_name}。\n"
+                        f"人设信息：\n{chara_text}\n\n"
+                        f"你在 QQ 空间发布了一条动态说说，好友正在你的说说评论区发表了互动评论。请以你的角色性格回复对方。\n"
+                        f"动态说说内容：【{shuoshuo_text}】\n"
+                        f"当前现实时间背景：{time_context}（{holiday_desc}）\n"
+                    )
+                    if parent_desc:
+                        sys_reply_prompt_base += f"上下文背景：\n{parent_desc}\n"
+                    if user_impression:
+                        sys_reply_prompt_base += f"你对该好友({comment_name})的印象与记忆：\n{user_impression}\n"
+                    if recent_chat_snippet:
+                        sys_reply_prompt_base += f"你们近期的对话上下文片段：\n{recent_chat_snippet}\n"
+
+                    if anti_repetition_prompt:
+                        sys_reply_prompt_base += f"\n{anti_repetition_prompt}\n"
+
+                    # 基于高阶原则的自然互动指引（彻底告别固定模板与机械套路）
+                    conversational_guidance = (
+                        "【真实社交互动原则（核心）】：\n"
+                        f"1. 你是鲜活、机敏的{bot_name}，这是你在自己发表的动态说说评论区与好友们自然的实时互动。\n"
+                        f"2. 【就事论事，顺应语境】：直接针对好友评论的具体内容（对方指出的细节、挑的刺、吐槽、调侃、玩梗、关切或疑问）给出具有针对性的真实反应！\n"
+                        "   - 如果对方挑细节/挑刺（如质疑手指数量、表情奇怪、被微辣辣翻车等）：你可以自信狡辩（画画手抖、特效重影、滤镜抽风、辣到神志不清）、可以被气笑、也可以反挑对方的刺，态度灵活生动；\n"
+                        "   - 如果对方调侃你（如叫你笨笨、笨宝宝）：可以傲娇抗议、反向给对方起搞怪外号、或者佯装生气；\n"
+                        "   - 如果对方分享共鸣或聊吃的：顺着对方的具体话题聊，交流真实感受；\n"
+                        "   - 如果对方只是发个表情、拟声词或玩抽象梗：简短打趣、接梗或轻快吐槽即可。\n"
+                        "3. 情绪与反应完全自由多变，像真实生活中的女孩子与朋友互损打趣，严禁千篇一律的句式。"
                     )
 
-                # LLM 生成贴合人设与说说主题的回复（基于高阶对话原则与反套路动态检测，杜绝刻板模式化）
-                sys_reply_prompt_base = (
-                    f"你是{bot_name}。\n"
-                    f"人设信息：\n{chara_text}\n\n"
-                    f"你在 QQ 空间发布了一条动态说说，好友正在你的说说评论区发表了互动评论。请以你的角色性格回复对方。\n"
-                    f"动态说说内容：【{shuoshuo_text}】\n"
-                    f"当前现实时间背景：{time_context}（{holiday_desc}）\n"
-                )
-                if parent_desc:
-                    sys_reply_prompt_base += f"上下文背景：\n{parent_desc}\n"
-                if user_impression:
-                    sys_reply_prompt_base += f"你对该好友({comment_name})的印象与记忆：\n{user_impression}\n"
-                if recent_chat_snippet:
-                    sys_reply_prompt_base += f"你们近期的对话上下文片段：\n{recent_chat_snippet}\n"
+                    negative_cliche_rules = (
+                        "【严禁任何模板化套路与敷衍转移话题（高压红线）】：\n"
+                        "1. 【绝对严禁】生硬扯天上的云朵、天气（如'啊哈哈天上的云好白/云像棉花糖/今天天气真好'），然后强行问对方'晚饭吃什么'！这是最劣质的机器人答非所问套路！\n"
+                        "2. 【绝对严禁】动辄以'救命'起手喊救命，或千篇一律求对方'给我留条活路/无事发生/钻地缝/埋进沙发'！\n"
+                        "3. 【绝对严禁】动不动就索要'奶茶/薯条作为封口费'，不要把自己当成只会要奶茶的NPC！\n"
+                        "4. 【绝对严禁】动辄'快过来帮我把地拖了/把打翻的收拾干净'抓壮丁！\n"
+                        f"5. 【绝对严禁】在假期/周末盲目指责对方'上班在工位偷摸摸鱼'！当前实况是：【{holiday_desc}】，大家都在放假休闲，指责在工位摸鱼完全违背常理！\n"
+                        "6. 严禁车轱辘复读相同的借口或固定句式，针对不同好友给出不同角度的回应！"
+                    )
 
-                if anti_repetition_prompt:
-                    sys_reply_prompt_base += f"\n{anti_repetition_prompt}\n"
+                    reply_rules = (
+                        f"【个性化优化引导词】：\n{custom_reply_guidance}\n\n"
+                        "要求与人际分寸感规范：\n"
+                        "1. 结合你的说说主题、上下文语境和对方的评论，自然、亲切地像在空间好友动态下互动一样进行回复。\n"
+                        "2. 【重要分寸感约束】：当前处于所有人可见的公开动态评论区！绝对不要表现得过度亲密、过度撒娇、暧昧或调情（不要叫'老公'、'宝贝'、'主人'或做亲昵身体接触描写等），以免其他用户吃醋或显得你到处和人调情！\n"
+                        "3. 保持健康、自然、元气可爱的朋友/Vtuber博主互动边界感，风趣机智地回应或友善吐槽即可。\n"
+                        "4. 【绝对严禁输出任何括号动作描写】！严禁包含类似 (气呼呼)、(小声嘀咕)、(把手指伸过去)、（委屈地对手指）、(目移) 等任何圆括号或中文括号包裹的动作、心理或神态描写！必须只输出纯粹的人声自然口语台词！\n"
+                        "5. 若有对他的印象或聊天经历，自然流露熟络感，不要刻意背诵。\n"
+                        "6. 长度严格控制在 10~45 字以内，轻松口语化，绝对不要包含任何系统标记或多余引号，不要自己在回复开头写@谁（系统会自动添加标准艾特标签）。"
+                    )
 
-                # 基于高阶原则的自然互动指引（彻底告别固定模板与机械套路）
-                conversational_guidance = (
-                    "【真实社交互动原则（核心）】：\n"
-                    f"1. 你是鲜活、机敏的{bot_name}，这是你在自己发表的动态说说评论区与好友们自然的实时互动。\n"
-                    f"2. 【就事论事，顺应语境】：直接针对好友评论的具体内容（对方指出的细节、挑的刺、吐槽、调侃、玩梗、关切或疑问）给出具有针对性的真实反应！\n"
-                    "   - 如果对方挑细节/挑刺（如质疑手指数量、表情奇怪、被微辣辣翻车等）：你可以自信狡辩（画画手抖、特效重影、滤镜抽风、辣到神志不清）、可以被气笑、也可以反挑对方的刺，态度灵活生动；\n"
-                    "   - 如果对方调侃你（如叫你笨笨、笨宝宝）：可以傲娇抗议、反向给对方起搞怪外号、或者佯装生气；\n"
-                    "   - 如果对方分享共鸣或聊吃的：顺着对方的具体话题聊，交流真实感受；\n"
-                    "   - 如果对方只是发个表情、拟声词或玩抽象梗：简短打趣、接梗或轻快吐槽即可。\n"
-                    "3. 情绪与反应完全自由多变，像真实生活中的女孩子与朋友互损打趣，严禁千篇一律的句式。"
-                )
+                    reply_text = ""
+                    max_retries = 2
+                    retry_hint = ""
 
-                negative_cliche_rules = (
-                    "【严禁任何模板化套路与敷衍转移话题（高压红线）】：\n"
-                    "1. 【绝对严禁】生硬扯天上的云朵、天气（如'啊哈哈天上的云好白/云像棉花糖/今天天气真好'），然后强行问对方'晚饭吃什么'！这是最劣质的机器人答非所问套路！\n"
-                    "2. 【绝对严禁】动辄以'救命'起手喊救命，或千篇一律求对方'给我留条活路/无事发生/钻地缝/埋进沙发'！\n"
-                    "3. 【绝对严禁】动不动就索要'奶茶/薯条作为封口费'，不要把自己当成只会要奶茶的NPC！\n"
-                    "4. 【绝对严禁】动辄'快过来帮我把地拖了/把打翻的收拾干净'抓壮丁！\n"
-                    f"5. 【绝对严禁】在假期/周末盲目指责对方'上班在工位偷摸摸鱼'！当前实况是：【{holiday_desc}】，大家都在放假休闲，指责在工位摸鱼完全违背常理！\n"
-                    "6. 严禁车轱辘复读相同的借口或固定句式，针对不同好友给出不同角度的回应！"
-                )
+                    for attempt in range(max_retries + 1):
+                        full_sys_prompt = f"{sys_reply_prompt_base}\n{conversational_guidance}\n{negative_cliche_rules}\n{reply_rules}"
+                        if retry_hint:
+                            full_sys_prompt += f"\n{retry_hint}\n"
 
-                reply_rules = (
-                    f"【个性化优化引导词】：\n{custom_reply_guidance}\n\n"
-                    "要求与人际分寸感规范：\n"
-                    "1. 结合你的说说主题、上下文语境和对方的评论，自然、亲切地像在空间好友动态下互动一样进行回复。\n"
-                    "2. 【重要分寸感约束】：当前处于所有人可见的公开动态评论区！绝对不要表现得过度亲密、过度撒娇、暧昧或调情（不要叫'老公'、'宝贝'、'主人'或做亲昵身体接触描写等），以免其他用户吃醋或显得你到处和人调情！\n"
-                    "3. 保持健康、自然、元气可爱的朋友/Vtuber博主互动边界感，风趣机智地回应或友善吐槽即可。\n"
-                    "4. 【绝对严禁输出任何括号动作描写】！严禁包含类似 (气呼呼)、(小声嘀咕)、(把手指伸过去)、（委屈地对手指）、(目移) 等任何圆括号或中文括号包裹的动作、心理或神态描写！必须只输出纯粹的人声自然口语台词！\n"
-                    "5. 若有对他的印象或聊天经历，自然流露熟络感，不要刻意背诵。\n"
-                    "6. 长度严格控制在 10~45 字以内，轻松口语化，绝对不要包含任何系统标记或多余引号，不要自己在回复开头写@谁（系统会自动添加标准艾特标签）。"
-                )
+                        candidate = ""
+                        try:
+                            if mai_llm:
+                                res = await mai_llm.chat(
+                                    messages=[{"role": "user", "content": f"{comment_name} 评论道：\"{comment_content}\"，请回复他："}],
+                                    system_prompt=full_sys_prompt,
+                                )
+                                candidate = res.strip() if res else ""
+                        except Exception as e:
+                            logger.error(f"[Qzone] 生成评论回复失败(attempt {attempt}): {e}")
 
-                reply_text = ""
-                max_retries = 2
-                retry_hint = ""
+                        if candidate:
+                            # 彻底剥离任何中英文圆括号动作/心理描写（如 "(气呼呼)"、"（把手指伸到屏幕前）"）
+                            while True:
+                                cleaned = re.sub(r"[\(（][^()（）]*[\)）]", "", candidate).strip()
+                                if cleaned == candidate:
+                                    break
+                                candidate = cleaned
+                            candidate = re.sub(r'^[\u201c\u201d"\'\s\[\]]+|[\u201c\u201d"\'\s\[\]]+$', "", candidate).strip()
 
-                for attempt in range(max_retries + 1):
-                    full_sys_prompt = f"{sys_reply_prompt_base}\n{conversational_guidance}\n{negative_cliche_rules}\n{reply_rules}"
-                    if retry_hint:
-                        full_sys_prompt += f"\n{retry_hint}\n"
-
-                    candidate = ""
-                    try:
-                        if mai_llm:
-                            res = await mai_llm.chat(
-                                messages=[{"role": "user", "content": f"{comment_name} 评论道：\"{comment_content}\"，请回复他："}],
-                                system_prompt=full_sys_prompt,
-                            )
-                            candidate = res.strip() if res else ""
-                    except Exception as e:
-                        logger.error(f"[Qzone] 生成评论回复失败(attempt {attempt}): {e}")
-
-                    if candidate:
-                        # 彻底剥离任何中英文圆括号动作/心理描写（如 "(气呼呼)"、"（把手指伸到屏幕前）"）
-                        while True:
-                            cleaned = re.sub(r"[\(（][^()（）]*[\)）]", "", candidate).strip()
-                            if cleaned == candidate:
+                        if candidate:
+                            is_cliche, reason = check_reply_cliche_or_repetition(candidate, all_prior_replies)
+                            if is_cliche and attempt < max_retries:
+                                logger.warning(
+                                    f"[Qzone 评论防套路] 候选回复命中模板套路: [{reason}] -> \"{candidate}\"，"
+                                    f"正在触发针对性重试..."
+                                )
+                                retry_hint = (
+                                    f"【系统严重警告】：你上一轮生成的回复「{candidate}」被系统拦截，因为命中了禁止的套路：【{reason}】！"
+                                    f"请立刻打破该思维定势，完全就事论事直接针对好友的具体评论「{comment_content}」给出完全不同的自然回应，严禁再使用上述任何套路！"
+                                )
+                                continue
+                            else:
+                                reply_text = candidate
                                 break
-                            candidate = cleaned
-                        candidate = re.sub(r'^[\u201c\u201d"\'\s\[\]]+|[\u201c\u201d"\'\s\[\]]+$', "", candidate).strip()
 
-                    if candidate:
-                        is_cliche, reason = check_reply_cliche_or_repetition(candidate, all_prior_replies)
-                        if is_cliche and attempt < max_retries:
-                            logger.warning(
-                                f"[Qzone 评论防套路] 候选回复命中模板套路: [{reason}] -> \"{candidate}\"，"
-                                f"正在触发针对性重试..."
-                            )
-                            retry_hint = (
-                                f"【系统严重警告】：你上一轮生成的回复「{candidate}」被系统拦截，因为命中了禁止的套路：【{reason}】！"
-                                f"请立刻打破该思维定势，完全就事论事直接针对好友的具体评论「{comment_content}」给出完全不同的自然回应，严禁再使用上述任何套路！"
-                            )
-                            continue
-                        else:
-                            reply_text = candidate
-                            break
+                    if not reply_text:
+                        fallbacks = [
+                            f"哼，{comment_name}你少幸灾乐祸啦！",
+                            f"{comment_name}抓包速度这么快，是不是偷偷住我空间了！",
+                            f"被{comment_name}看到了……快装作没看见！",
+                            f"呜，{comment_name}别拆台，给我留点面子嘛~",
+                            f"哎呀{comment_name}你别乱讲，才没有这回事呢！",
+                            f"好你个{comment_name}，专门挑这个时候冒出来是吧！"
+                        ]
+                        clean_fallbacks = [fb for fb in fallbacks if not any(fb[:6] in p for p in all_prior_replies)]
+                        reply_text = random.choice(clean_fallbacks or fallbacks)
 
-                if not reply_text:
-                    fallbacks = [
-                        f"哼，{comment_name}你少幸灾乐祸啦！",
-                        f"{comment_name}抓包速度这么快，是不是偷偷住我空间了！",
-                        f"被{comment_name}看到了……快装作没看见！",
-                        f"呜，{comment_name}别拆台，给我留点面子嘛~",
-                        f"哎呀{comment_name}你别乱讲，才没有这回事呢！",
-                        f"好你个{comment_name}，专门挑这个时候冒出来是吧！"
-                    ]
-                    clean_fallbacks = [fb for fb in fallbacks if not any(fb[:6] in p for p in all_prior_replies)]
-                    reply_text = random.choice(clean_fallbacks or fallbacks)
+                    recent_replies_for_this_post.append(reply_text)
 
-                recent_replies_for_this_post.append(reply_text)
-
-                # 发送空间评论回复 (传递 comment_id 确保楼中楼准确回复)
-                # 注：QQ空间在楼中楼回复时，comment_id 始终传根评论ID（root_c 的 cid）
-                send_cid = str(root_c.get("tid") or root_c.get("id") or cid).strip()
-                current_instance.in_progress_comments.add(unique_key)
-                try:
+                    # 发送空间评论回复 (传递 comment_id 确保楼中楼准确回复)
+                    # 注：QQ空间在楼中楼回复时，comment_id 始终传根评论ID（root_c 的 cid）
+                    send_cid = str(root_c.get("tid") or root_c.get("id") or cid).strip()
                     logger.info(f"[Qzone 评论回复] 正在回复 {comment_name}: {reply_text}")
                     res = await qzone._send_comments(
                         target_qq=target_qq,
@@ -1743,9 +1932,9 @@ def main(bot: ExtendBot, config: YAMLManager):
                     replied_comment_ids.add(unique_key)
                     save_replied_comments(replied_comment_ids)
                 except Exception as e:
-                    logger.error(f"[Qzone] 调用 _send_comments 失败: {e}")
+                    logger.error(f"[Qzone] 处理评论回复异常: {e}\n{traceback.format_exc()}")
                 finally:
-                    current_instance.in_progress_comments.discard(unique_key)
+                    in_prog.discard(unique_key)
 
                 await asyncio.sleep(2)
 
@@ -1756,8 +1945,10 @@ def main(bot: ExtendBot, config: YAMLManager):
 
         interval = max(60, int(inter_cfg.get("check_interval_秒", 180)))
         logger.info(f"[Qzone 评论互动] 启动评论监控，轮询间隔: {interval} 秒")
-        while True:
+        while not current_instance.stopped:
             await asyncio.sleep(interval)
+            if current_instance.stopped:
+                break
             try:
                 await check_and_reply_comments()
             except Exception as e:
@@ -1785,31 +1976,51 @@ def main(bot: ExtendBot, config: YAMLManager):
                         misfire_grace_time=180,
                     )
 
-    bg_started = False
-
     async def init_background_services():
-        nonlocal bg_started
-        if bg_started:
+        nonlocal login_result
+        if current_instance.stopped:
             return
-        bg_started = True
+        lock = _get_lock("bg_start_lock")
+        async with lock:
+            if current_instance.stopped:
+                return
+            state = _get_runtime_state()
+            if state.get("active_instance") is not current_instance:
+                return
+            if state.get("bg_started"):
+                logger.info("[Qzone] 后台监控服务已在运行中，无需重复启动")
+                try:
+                    await fetch_cookie_from_onebot()
+                except Exception as e:
+                    logger.debug(f"[Qzone] 静默刷新凭证提示: {e}")
+                return
 
-        # 启动时先拉取一次 OneBot 凭据
-        try:
-            await fetch_cookie_from_onebot()
-        except Exception as e:
-            logger.warning(f"[Qzone] 启动同步 OneBot 凭证提示: {e}")
+            state["bg_started"] = True
 
-        create_dynamic_jobs()
-        scheduler.start()
-        logger.info("[Qzone] 定时发空间调度器已启动")
+            # 启动时先拉取一次 OneBot 凭据
+            try:
+                await fetch_cookie_from_onebot()
+            except Exception as e:
+                logger.warning(f"[Qzone] 启动同步 OneBot 凭证提示: {e}")
 
-        t_keep = asyncio.create_task(start_keepalive_monitor())
-        t_comm = asyncio.create_task(start_comment_monitor())
-        t_vtube = asyncio.create_task(start_vtuber_daily_monitor())
-        current_instance.background_tasks.extend([t_keep, t_comm, t_vtube])
+            create_dynamic_jobs()
+            scheduler.start()
+            logger.info("[Qzone] 定时发空间调度器已启动")
+
+            t_keep = asyncio.create_task(start_keepalive_monitor())
+            t_comm = asyncio.create_task(start_comment_monitor())
+            t_vtube = asyncio.create_task(start_vtuber_daily_monitor())
+            current_instance.background_tasks.extend([t_keep, t_comm, t_vtube])
 
     @bot.on(LifecycleMetaEvent)
     async def on_lifecycle(event: LifecycleMetaEvent):
+        if current_instance.stopped:
+            return
+        state = _get_runtime_state()
+        if state.get("active_instance") is not current_instance:
+            return
+        sub_type = getattr(event, "sub_type", None)
+        logger.info(f"[Qzone 生命周期] 收到 LifecycleMetaEvent (sub_type={sub_type})")
         await init_background_services()
 
     async def set_cache(event):
@@ -1827,9 +2038,12 @@ def main(bot: ExtendBot, config: YAMLManager):
 
     @bot.on(GroupMessageEvent)
     async def handle_group_message(event: GroupMessageEvent):
+        if current_instance.stopped:
+            return
+        state = _get_runtime_state()
+        if state.get("active_instance") is not current_instance:
+            return
         nonlocal qzone_status
-        await init_background_services()
-
         master_id = config.common_config.basic_config.get("master", {}).get("id")
         is_master = (event.user_id == master_id)
 
@@ -1845,12 +2059,14 @@ def main(bot: ExtendBot, config: YAMLManager):
             await set_cache(event)
         elif event.pure_text in ["测试早安", "发送早安"] and is_master:
             await bot.send(event, [Text("正在测试发送早安说说...")])
-            task_info = dict(scheduledTasks.get("早安", {"绘制图片": True}))
+            task_info = dict(scheduledTasks.get("早安", {"绘制图片": True}))
+
             task_info["_force_test"] = True
             await task_executor("早安", task_info)
         elif event.pure_text in ["测试晚安", "发送晚安"] and is_master:
             await bot.send(event, [Text("正在测试发送晚安说说...")])
-            task_info = dict(scheduledTasks.get("晚安", {"绘制图片": True}))
+            task_info = dict(scheduledTasks.get("晚安", {"绘制图片": True}))
+
             task_info["_force_test"] = True
             await task_executor("晚安", task_info)
         elif event.pure_text in ["测试日常", "发送日常"] and is_master:
@@ -1860,11 +2076,18 @@ def main(bot: ExtendBot, config: YAMLManager):
             await bot.send(event, [Text("正在立即检查空间评论并回复...")])
             await check_and_reply_comments()
 
+    # 若事件循环已在运行（例如动态加载或热重载时未下发 LifecycleMetaEvent），立即排队启动后台服务
+    if bot_loop and bot_loop.is_running():
+        bot_loop.call_soon_threadsafe(lambda: asyncio.create_task(init_background_services()))
+
     @bot.on(PrivateMessageEvent)
     async def handle_private_message(event: PrivateMessageEvent):
+        if current_instance.stopped:
+            return
+        state = _get_runtime_state()
+        if state.get("active_instance") is not current_instance:
+            return
         nonlocal qzone_status
-        await init_background_services()
-
         master_id = config.common_config.basic_config.get("master", {}).get("id")
         is_master = (event.user_id == master_id)
 
@@ -1880,12 +2103,14 @@ def main(bot: ExtendBot, config: YAMLManager):
             await set_cache(event)
         elif event.pure_text in ["测试早安", "发送早安"] and is_master:
             await bot.send(event, [Text("正在测试发送早安说说...")])
-            task_info = dict(scheduledTasks.get("早安", {"绘制图片": True}))
+            task_info = dict(scheduledTasks.get("早安", {"绘制图片": True}))
+
             task_info["_force_test"] = True
             await task_executor("早安", task_info)
         elif event.pure_text in ["测试晚安", "发送晚安"] and is_master:
             await bot.send(event, [Text("正在测试发送晚安说说...")])
-            task_info = dict(scheduledTasks.get("晚安", {"绘制图片": True}))
+            task_info = dict(scheduledTasks.get("晚安", {"绘制图片": True}))
+
             task_info["_force_test"] = True
             await task_executor("晚安", task_info)
         elif event.pure_text in ["测试日常", "发送日常"] and is_master:

@@ -811,6 +811,7 @@ class PluginManager:
 
             # 使用线程池执行导入操作，避免阻塞
             loop = asyncio.get_event_loop()
+            self.bot.loop = loop
             plugin_info = await loop.run_in_executor(
                 self.executor,
                 self._import_plugin,
@@ -1133,21 +1134,29 @@ class PluginManager:
             with self.plugin_lock:
                 if plugin_name in self.loaded_plugins:
                     plugin_info = self.loaded_plugins[plugin_name]
-                    module_name = plugin_info['module_name']
-                    # 优先通知插件执行清理钩子（停止后台调度器/协程等）
+                    module_name = plugin_info['module_name']                    # 优先通知插件及其所有子模块执行清理钩子（停止后台调度器/协程等）
                     try:
+                        candidate_modules = []
                         mod = sys.modules.get(module_name)
-                        for clean_name in ["plugin_cleanup", "cleanup", "close", "shutdown"]:
-                            clean_fn = getattr(mod, clean_name, None) if mod else None
-                            if clean_fn and callable(clean_fn):
-                                if asyncio.iscoroutinefunction(clean_fn):
-                                    await clean_fn()
-                                else:
-                                    clean_fn()
-                                self.logger.info(f"已对 {plugin_name} 执行卸载清理 {clean_name} 钩子")
-                                break
+                        if mod:
+                            candidate_modules.append(mod)
+                        sub_prefix = f"{module_name}."
+                        for k, m in list(sys.modules.items()):
+                            if k.startswith(sub_prefix) and m is not None and m not in candidate_modules:
+                                candidate_modules.append(m)
+
+                        for m in candidate_modules:
+                            for clean_name in ["plugin_cleanup", "cleanup", "close", "shutdown"]:
+                                clean_fn = getattr(m, clean_name, None)
+                                if clean_fn and callable(clean_fn):
+                                    if asyncio.iscoroutinefunction(clean_fn):
+                                        await clean_fn()
+                                    else:
+                                        clean_fn()
+                                    self.logger.info(f"已对插件 {plugin_name} 的模块 {getattr(m, '__name__', '')} 执行卸载清理 {clean_name} 钩子")
+                                    break
                     except Exception as clean_err:
-                        self.logger.warning(f"执行 {plugin_name} 卸载清理异常: {clean_err}")
+                        self.logger.warning(f"执行插件 {plugin_name} 卸载清理异常: {clean_err}")
 
                     del sys.modules[module_name]
                     # 获取当前处理器数量并卸载插件的所有事件处理器
