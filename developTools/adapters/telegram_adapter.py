@@ -28,9 +28,13 @@ class TelegramAdapter:
     ):
         self.token = token.strip()
         self.hub_ws_url = hub_ws_url
-        self.proxy = proxy if proxy else None
+        self.proxy = self._normalize_proxy(proxy)
         self.default_qq_id = int(default_qq_id)
         self.logger = get_logger()
+        if self.proxy:
+            self.logger.tg_info(f"[TelegramAdapter] 当前使用代理: {self.proxy}")
+        else:
+            self.logger.tg_info("[TelegramAdapter] 当前未配置代理（直连模式）")
 
         # Bot 自身信息
         self.bot_id: int = 1000000
@@ -56,6 +60,18 @@ class TelegramAdapter:
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.is_running = False
         self.tg_offset = 0
+
+    @staticmethod
+    def _normalize_proxy(proxy: Optional[str]) -> Optional[str]:
+        if not proxy:
+            return None
+        p = str(proxy).strip()
+        if not p:
+            return None
+        # 若传入无 scheme 的 host:port，如 127.0.0.1:10809，自动补齐 http://
+        if "://" not in p:
+            p = f"http://{p}"
+        return p
 
     def _load_bindings(self) -> Dict[str, int]:
         try:
@@ -143,7 +159,8 @@ class TelegramAdapter:
                         self.bot_first_name = bot_info.get("first_name", "YuccaBot")
                         self.logger.tg_info(f"[TelegramAdapter] 成功获取 Bot 信息: @{self.bot_username} (ID: {self.bot_id})")
         except Exception as e:
-            self.logger.tg_warning(f"[TelegramAdapter] 获取 Bot 信息失败: {e}")
+            err_detail = repr(e) if not str(e).strip() else f"{type(e).__name__}: {e}"
+            self.logger.tg_warning(f"[TelegramAdapter] 获取 Bot 信息失败: {err_detail}")
 
     async def start(self):
         """启动 Telegram Adapter：连接 Hub WS 与 Telegram 轮询"""
@@ -677,7 +694,8 @@ class TelegramAdapter:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.tg_error(f"[TelegramAdapter] 轮询异常: {e}")
+                err_detail = repr(e) if not str(e).strip() else f"{type(e).__name__}: {e}"
+                self.logger.tg_error(f"[TelegramAdapter] 轮询异常: {err_detail}")
                 await asyncio.sleep(2)
             await asyncio.sleep(0.3)
 
