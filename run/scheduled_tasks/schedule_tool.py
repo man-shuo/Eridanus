@@ -79,19 +79,46 @@ async def call_create_schedule_task(
 
         scheduler = get_scheduler(bot=bot, config=config)
 
-        task = await scheduler.add_task(
-            creator_id=creator_id,
-            target_type=target_type,
-            target_id=target_id,
-            task_type="function_call" if action_type == "function_call" else "reminder",
-            time_str=time_str,
-            recur_type=recur_type,
-            weekdays=weekdays,
-            city=user_city,
-            action_type=action_type,
-            action_payload=action_payload,
-            description=description,
-        )
+        # 防抖与去重机制（Debounce / Deduplication）：
+        # LLM 在同一轮对话中如果连续调用或因思考延迟重复调用创建工具，
+        # 容易针对同一事件创建两个几乎同时触发的任务。
+        # 1. 意图/描述高度相似且触发时间差 <= 180 秒，视为重复任务直接复用；
+        # 2. 相同循环周期且触发时间差 <= 30 秒，视为重复任务。
+        active_tasks = await scheduler.list_active_tasks(target_id=target_id, target_type=target_type)
+        candidate_next_ts = scheduler.calculate_initial_next_run(time_str, recur_type, None, user_city)
+        clean_desc = description.strip().lower()
+        clean_prompt = (prompt_or_message or '').strip().lower()
+        for existing_task in active_tasks:
+            ext_desc = existing_task.description.strip().lower()
+            ext_payload = existing_task.get_payload_dict()
+            ext_prompt = (ext_payload.get('prompt') or ext_payload.get('message') or '').strip().lower()
+            
+            desc_similar = (
+                clean_desc == ext_desc
+                or (clean_prompt and (clean_prompt == ext_prompt or clean_prompt in ext_desc or ext_desc in clean_prompt))
+                or (clean_desc in ext_desc or ext_desc in clean_desc)
+            )
+            time_diff = abs(existing_task.next_run_timestamp - candidate_next_ts)
+            
+            # 发现高度重合的近期任务，直接复用以避免并发双重触发
+            if (desc_similar and time_diff <= 180) or (existing_task.recur_type == recur_type and time_diff <= 30):
+                logger.info(f"[ScheduleTool] 检测到重复或重叠定时任务 [{existing_task.task_id}] ({existing_task.description})，自动复用防抖")
+                task = existing_task
+                break
+        else:
+            task = await scheduler.add_task(
+                creator_id=creator_id,
+                target_type=target_type,
+                target_id=target_id,
+                task_type="function_call" if action_type == "function_call" else "reminder",
+                time_str=time_str,
+                recur_type=recur_type,
+                weekdays=weekdays,
+                city=user_city,
+                action_type=action_type,
+                action_payload=action_payload,
+                description=description,
+            )
 
         next_dt = datetime.datetime.fromtimestamp(task.next_run_timestamp)
         _, tz_name, _ = TimezoneHelper.resolve_timezone(user_city)

@@ -1,10 +1,7 @@
+# -*- coding: utf-8 -*-
 """
 func_collection.py
-函数调用集合 —— 供 Eridanus ai_llm 插件的函数调用体系使用
-
-当前提供：
-  - clear_chat_history: 清除当前用户的对话历史
-  - get_mood: 查看 bot 当前情绪
+函数调用集合 —— 供 Eridanus ai_llm / mai_reply 插件的函数调用体系使用
 """
 
 from framework_common.framework_util.websocket_fix import ExtendBot
@@ -29,3 +26,16 @@ async def get_current_mood(bot: ExtendBot, event, config: YAMLManager):
     score = emotion.get_score()
     direction = "↑" if score > 10 else ("↓" if score < -10 else "→")
     await bot.send(event, f"现在的状态：{mood}（情绪值 {score:+d} {direction}）")
+
+
+async def update_system(bot: ExtendBot, event, config: YAMLManager):
+    """
+    管理员专用系统更新函数：
+    1. 鉴权：仅允许 basic_config.yaml 中配置的 master.id 执行
+    2. 读取 basic_config.yaml 中的 git_update_source 源配置（默认 0 号源）
+    3. 后台执行更新逻辑（支持 AI 处理冲突与全文件类型清理）
+    4. 完成后向管理员私信汇报更新结果
+    5. 重启 Bot 进程使框架层修改生效
+    """
+    from tool import admin_update_system
+    return await admin_update_system(bot, event, config)

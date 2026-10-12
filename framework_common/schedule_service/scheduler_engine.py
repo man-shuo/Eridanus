@@ -87,6 +87,8 @@ class DynamicScheduler:
         self._running = False
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        self._tick_lock = asyncio.Lock()
+        self._running_tasks: set[str] = set()
         self._initialized = False
 
     @classmethod
@@ -196,7 +198,10 @@ class DynamicScheduler:
         now_ts = time.time()
         user_tz, _, _ = TimezoneHelper.resolve_timezone(city_or_tz)
 
-        # 1. 相对时间匹配（如 "30m", "30分钟后", "2小时后", "+15m"）
+        # 1. 相对时间匹配（如 "now", "立即", "马上", "30m", "30分钟后", "2小时后", "+15m"）
+        if recur_type == "once" and time_str.strip().lower() in ("now", "立即", "马上", "立刻", "当前"):
+            return now_ts
+
         rel_match = re.search(r"(\d+)\s*(分钟|小时|秒|m|h|s)", time_str)
         if recur_type == "once" and rel_match:
             num = int(rel_match.group(1))
@@ -444,6 +449,40 @@ class DynamicScheduler:
                     tasks.append(ScheduledTask(**dict(row)))
         return tasks
 
+    async def list_all_tasks(
+        self,
+        target_id: Optional[int] = None,
+        target_type: Optional[str] = None,
+        creator_id: Optional[int] = None,
+        status: Optional[str] = None
+    ) -> List[ScheduledTask]:
+        """查询指定维度的所有任务（包括 active / completed / cancelled）"""
+        await self.init_db()
+        tasks = []
+        async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
+            db.row_factory = aiosqlite.Row
+            query = "SELECT * FROM dynamic_tasks WHERE 1=1"
+            params = []
+            if status is not None:
+                query += " AND status = ?"
+                params.append(status)
+            if target_id is not None:
+                query += " AND target_id = ?"
+                params.append(target_id)
+            if target_type is not None:
+                query += " AND target_type = ?"
+                params.append(target_type)
+            if creator_id is not None:
+                query += " AND creator_id = ?"
+                params.append(creator_id)
+            query += " ORDER BY next_run_timestamp ASC"
+
+            async with db.execute(query, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    tasks.append(ScheduledTask(**dict(row)))
+        return tasks
+
     def _find_callable_tool(cls, tool_name: str) -> Optional[Any]:
         """从自定义注册表、func_map 或框架各模块中反射定位可执行的函数对象"""
         clean_name = tool_name.strip()
@@ -518,6 +557,11 @@ class DynamicScheduler:
     # -------------------------------------------------------------------------
     async def execute_task(self, task: ScheduledTask):
         """执行单个任务的具体动作"""
+        if task.task_id in self._running_tasks:
+            logger.warning(f"[DynamicScheduler] 任务 {task.task_id} 正在执行中，跳过重复并发执行")
+            return
+        self._running_tasks.add(task.task_id)
+
         bot = self.bot
         config = self.config
         payload = task.get_payload_dict()
@@ -532,7 +576,7 @@ class DynamicScheduler:
 
         try:
             # 1. 嵌套工具调用（执行任意已注册 Function，如 call_asmr 或其他 tool）
-            if task.action_type == "tool":
+            if task.action_type in ("tool", "function_call"):
                 tool_name = payload.get("tool_name", "")
                 tool_params = payload.get("tool_params") or payload.get("tool_args") or {}
 
@@ -574,31 +618,76 @@ class DynamicScheduler:
                 else:
                     logger.error(f"[DynamicScheduler] 工具 {tool_name} 未找到或不可调用")
 
-            # 2. 自然语言 / 提示词触发生成个性化消息（早安、叫起床、喝水提醒等）
-            elif task.action_type in ("message", "prompt"):
+            # 2. 自然语言 / 提示词触发生成个性化消息（早安、叫起床、喝水提醒等）或需要由LLM生成的任务
+            elif task.action_type in ("message", "prompt", "reminder", "morning_greeting", "night_greeting"):
                 prompt = payload.get("prompt") or payload.get("message") or task.description
                 sent = False
 
-                # 优先走 mai_reply 拟人回复引擎
+                # 优先走 mai_reply 的 ReplyEngine.handle 核心流程：
+                # 保持上下文记忆追踪、人设印象、TTS语音及情绪管理；
+                # 关键优化：
+                # 1. include_tools=False：纯提醒/消息生成不注入庞大的工具列表，节约大量 token 并彻底杜绝幻觉乱调用工具；
+                # 2. 若任务在 payload 中特别指定了 target_tools / tools_override，则通过 tools_override 针对性开放工具；
+                # 3. system_prompt_prefix 强指令：明确告知这是系统定时触发，严禁误判为对方发言（彻底根除“你怎么抢我台词”的误解）。
                 if config and hasattr(config, "mai_reply") and config.mai_reply.config.get("enable", False):
                     try:
                         from run.mai_reply.service.reply_engine import ReplyEngine
                         engine = ReplyEngine(config)
-                        await engine.handle(bot, event, prompt)
+
+                        # 构造系统提示前缀，防误判
+                        sys_instruction_prefix = (
+                            "【重要系统事件指令 - 严禁误判为对方发言】\n"
+                            f"当前时间到达了之前设置的定时提醒/问候触发时刻。\n"
+                            f"任务描述: {task.description}\n"
+                            "【核心要求】\n"
+                            "1. 本消息为系统内部到期自动触发，绝不是对话方对你说的台词！严禁回复诸如'你怎么抢我台词'或将本指令当成对方发言。\n"
+                            "2. 请直接以你的人设口吻，主动向对话方发出亲切、自然、生动的提醒或问候内容。"
+                        )
+
+                        user_prompt = f"【系统定时任务触发】到期提醒：{prompt}"
+
+                        # 检查是否有显式指定的特定工具覆盖需求
+                        target_tools = payload.get("target_tools") or payload.get("tools")
+                        tools_override = None
+                        include_tools = False
+
+                        if target_tools:
+                            # 如果指定了某些特定工具
+                            all_tools = engine._active_tools() or {}
+                            if isinstance(target_tools, list):
+                                tools_override = {k: v for k, v in all_tools.items() if k in target_tools or f"call_{k}" in target_tools}
+                            elif isinstance(target_tools, dict):
+                                tools_override = target_tools
+                            if tools_override:
+                                include_tools = True
+
+                        logger.info(f"[DynamicScheduler] 通过 ReplyEngine.handle 执行定时任务 (task_id={task.task_id}, include_tools={include_tools})")
+                        await engine.handle(
+                            bot=bot,
+                            event=event,
+                            clean_text=user_prompt,
+                            include_tools=include_tools,
+                            tools_override=tools_override,
+                            system_prompt_prefix=sys_instruction_prefix,
+                        )
                         sent = True
                     except Exception as e:
-                        logger.warning(f"[DynamicScheduler] 调用 mai_reply 生成消息失败: {e}，尝试使用 aiReplyCore")
+                        logger.warning(f"[DynamicScheduler] 调用 ReplyEngine.handle 执行任务失败: {e}，尝试使用 aiReplyCore 兜底", exc_info=True)
 
                 if not sent:
-                    # 回退到 aiReplyCore 或直接文本
-                    from run.ai_llm.service.aiReplyCore import aiReplyCore
-                    text = await aiReplyCore([{"text": prompt}], task.target_id, config, bot=bot)
-                    if bot:
-                        if task.target_type == "private":
-                            await bot.send_friend_message(task.target_id, text)
-                        else:
-                            await bot.send_group_message(task.target_id, text)
+                    # 降级备用：调用 aiReplyCore 进行拟人回复生成
+                    try:
+                        from run.ai_llm.service.aiReplyCore import aiReplyCore
+                        text = await aiReplyCore([{"text": prompt}], task.target_id, config, bot=bot)
+                    except Exception as fallback_err:
+                        logger.warning(f"[DynamicScheduler] 降级调用 aiReplyCore 异常: {fallback_err}，直接发送原始提示词")
+                        text = prompt
 
+                    if bot and text:
+                        if task.target_type == "private":
+                            await bot.send_friend_message(task.target_id, [Text(text)] if isinstance(text, str) else text)
+                        else:
+                            await bot.send_group_message(task.target_id, [Text(text)] if isinstance(text, str) else text)
             # 3. 主动私聊决策联动 (proactive_chat)
             elif task.action_type == "proactive_chat":
                 if config and hasattr(config, "mai_reply") and config.mai_reply.config.get("enable", False):
@@ -637,6 +726,8 @@ class DynamicScheduler:
 
         except Exception as e:
             logger.error(f"[DynamicScheduler] 执行任务 {task.task_id} 出错: {e}", exc_info=True)
+        finally:
+            self._running_tasks.discard(task.task_id)
 
     # -------------------------------------------------------------------------
     # 调度扫描循环 (Tick Loop)
@@ -771,41 +862,51 @@ class DynamicScheduler:
 
     async def tick(self):
         """单次调度扫描：检测到达触发时间的任务并执行，更新下一次触发时间"""
-        await self.init_db()
-        now_ts = time.time()
-
-        tasks_to_run = []
-        async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM dynamic_tasks WHERE status = 'active' AND next_run_timestamp <= ?",
-                (now_ts,)
-            ) as cursor:
-                rows = await cursor.fetchall()
-                for row in rows:
-                    tasks_to_run.append(ScheduledTask(**dict(row)))
-
-        if not tasks_to_run:
+        if self._tick_lock.locked():
             return
 
-        now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        async with self._tick_lock:
+            await self.init_db()
+            now_ts = time.time()
 
-        for task in tasks_to_run:
-            asyncio.create_task(self.execute_task(task))
-
-            next_ts = self.calculate_next_recur_run(task)
+            tasks_to_run = []
             async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
-                if next_ts is not None:
-                    await db.execute(
-                        "UPDATE dynamic_tasks SET next_run_timestamp = ?, last_run_at = ? WHERE task_id = ?",
-                        (next_ts, now_iso, task.task_id)
-                    )
-                else:
-                    await db.execute(
-                        "UPDATE dynamic_tasks SET status = 'completed', last_run_at = ? WHERE task_id = ?",
-                        (now_iso, task.task_id)
-                    )
-                await db.commit()
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM dynamic_tasks WHERE status = 'active' AND next_run_timestamp <= ?",
+                    (now_ts,)
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        t = ScheduledTask(**dict(row))
+                        if t.task_id not in self._running_tasks:
+                            tasks_to_run.append(t)
+
+            if not tasks_to_run:
+                return
+
+            now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            for task in tasks_to_run:
+                # 立即计算并更新下一次触发状态，防止重复扫描
+                next_ts = self.calculate_next_recur_run(task)
+                async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
+                    if next_ts is not None:
+                        await db.execute(
+                            "UPDATE dynamic_tasks SET next_run_timestamp = ?, last_run_at = ? WHERE task_id = ?",
+                            (next_ts, now_iso, task.task_id)
+                        )
+                        next_dt_str = datetime.datetime.fromtimestamp(next_ts).strftime("%Y-%m-%d %H:%M:%S")
+                        logger.info(f"[DynamicScheduler] 循环任务 [{task.task_id}] ({task.description}) 到期执行，下一次触发时间: {next_dt_str}")
+                    else:
+                        await db.execute(
+                            "UPDATE dynamic_tasks SET status = 'completed', last_run_at = ? WHERE task_id = ?",
+                            (now_iso, task.task_id)
+                        )
+                        logger.info(f"[DynamicScheduler] 一次性任务 [{task.task_id}] ({task.description}) 到期执行完毕，已持久化标记为完成 (status='completed')，移出待执行队列")
+                    await db.commit()
+
+                asyncio.create_task(self.execute_task(task))
 
     async def _scheduler_loop(self):
         logger.info("[DynamicScheduler] 核心调度监控循环已启动")

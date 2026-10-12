@@ -1,364 +1,701 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import os
 import re
 import shutil
 import subprocess
 import sys
-
-
+import time
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from developTools.utils.logger import get_logger
-
 from framework_common.utils.install_and_import import install_and_import
 
-"""
-获取环境
-"""
 logger = get_logger()
-logger.warning("请在关闭bot主程序的情况下运行更新程序")
-logger.warning("请在关闭bot主程序的情况下运行更新程序")
-logger.warning("请在关闭bot主程序的情况下运行更新程序")
-
 
 parent_dir = os.path.dirname(os.getcwd())
-# 检测上一级目录下的environments/MinGit/cmd/git.exe是否存在
 custom_git_path = os.path.join(parent_dir, "environments", "MinGit", "cmd", "git.exe")
 if os.path.exists(custom_git_path):
     git_path = custom_git_path
 else:
     git_path = "git"
-logger.info(f"git_path: {git_path}")
+
+custom_python_path = os.path.join(parent_dir, "environments", "Python311", "python.exe")
+python_path = sys.executable
+
 try:
-    logger.info("尝试为git配置代理")
-    from framework_common.framework_util.yamlLoader import YAMLManager
-    ym = YAMLManager.get_instance()
-    proxy=ym.common_config.basic_config["proxy"]["http_proxy"]
-    if proxy:
-        logger.warning(f"检测到设置了代理{proxy}，是否要为git配置代理？输入y可确认，输入n清除代理，回车则不做修改。gitcode源不需要代理")
-        set_proxy=input("在此输入：")
-        if set_proxy=="y":
-            logger.info(f"检测到代理配置，正在为 Git 配置代理: {proxy}")
-            try:
-                # 设置 http 和 https 代理
+    from pip._internal.cli.main import main as pip_main
+except ImportError:
+    pip_main = None
+
+if pip_main is not None:
+    try:
+        pip_main(['config', 'set', 'global.index-url', 'https://mirrors.aliyun.com/pypi/simple/'])
+    except Exception:
+        pass
+
+SOURCES = [
+    "https://github.com/avilliai/Eridanus.git",
+    "https://gitcode.com/faasf/Eridanus.git",
+    "https://github.akams.cn/https://github.com/avilliai/Eridanus.git",
+    "https://mirror.ghproxy.com/https://github.com/avilliai/Eridanus",
+    "https://ghfast.top/https://github.com/avilliai/Eridanus.git",
+    "https://gh.llkk.cc/https://github.com/avilliai/Eridanus.git"
+]
+
+YAML_BACKUP_DIR = os.path.join("temp", "yaml_backup")
+
+try:
+    from ruamel.yaml import YAML
+except Exception:
+    if pip_main is not None:
+        try:
+            pip_main(['install', 'ruamel.yaml'])
+        except Exception:
+            pass
+    from ruamel.yaml import YAML
+
+yaml = YAML()
+yaml.preserve_quotes = True
+yaml.indent(mapping=2, sequence=4, offset=2)
+
+
+def setup_git_proxy_if_interactive():
+    try:
+        from framework_common.framework_util.yamlLoader import YAMLManager
+        ym = YAMLManager.get_instance()
+        proxy = ym.common_config.basic_config.get("proxy", {}).get("http_proxy")
+        if proxy:
+            logger.warning(f"检测到设置了代理 {proxy}，是否要为 git 配置代理？输入 y 确认，输入 n 清除代理，回车不做修改。gitcode 源不需要代理。")
+            set_proxy = input("在此输入：").strip().lower()
+            if set_proxy == "y":
                 subprocess.run([git_path, "config", "--global", "http.proxy", proxy], check=True)
                 subprocess.run([git_path, "config", "--global", "https.proxy", proxy], check=True)
                 logger.info("Git 代理配置成功。")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Git 代理配置失败: {e}")
-        elif set_proxy=="n":
-            try:
-                # 使用 --unset 清除代理配置，stderr=subprocess.DEVNULL 是为了忽略由于本来就没有配置代理而产生的报错
+            elif set_proxy == "n":
                 subprocess.run([git_path, "config", "--global", "--unset", "http.proxy"], stderr=subprocess.DEVNULL)
                 subprocess.run([git_path, "config", "--global", "--unset", "https.proxy"], stderr=subprocess.DEVNULL)
                 logger.info("Git 全局代理已清除。")
-            except Exception as e:
-                logger.warning(f"清除 Git 代理时发生异常 (通常可以忽略): {e}")
+    except Exception as e:
+        logger.debug(f"Git 代理交互配置跳过或异常: {e}")
+
+
+def merge_dicts(old, new):
+    for k, v in old.items():
+        if isinstance(v, dict) and k in new and isinstance(new[k], dict):
+            merge_dicts(v, new[k])
+        elif isinstance(v, list) and k in new and isinstance(new[k], list):
+            if k in ["api_keys", "sdUrl", "其他默认绘图参数", "card_index", "steam_api_key", "nano_banana_key", "固定入群欢迎", "apikey"]:
+                new[k] = v
+            elif k.startswith("page"):
+                logger.warning("当前任务为菜单，使用最新配置覆盖旧配置。")
+            else:
+                try:
+                    new[k] = list(dict.fromkeys(new[k] + v))
+                except Exception:
+                    logger.error("列表合并出错，默认用最新配置")
+        elif k in new and not isinstance(v, type(new[k])) and not isinstance(new[k], type(v)):
+            continue
+        elif k in new:
+            new[k] = v
+        else:
+            # 旧配置中有但新模板中没有的自定义字段，完整保留
+            new[k] = v
+
+
+def conflict_file_dealter(file_old, file_new):
+    with open(file_old, 'r', encoding="utf-8") as file:
+        old_data = yaml.load(file)
+    with open(file_new, 'r', encoding="utf-8") as file:
+        new_data = yaml.load(file)
+    if old_data is not None and new_data is not None:
+        merge_dicts(old_data, new_data)
+        with open(file_new, 'w', encoding="utf-8") as file:
+            yaml.dump(new_data, file)
+
+
+def print_result_banner(status: str, detail: str = ""):
+    line = "=" * 66
+    if status == "UP_TO_DATE":
+        msg = [
+            line,
+            "【当前已经是最新版本！】(Already Up-To-Date)",
+            line,
+            "您的代码库已与远程仓库完全同步，无需额外更新。",
+            "所有配置文件与资源文件完好，您可以正常启动 Bot！",
+            line
+        ]
+        for m in msg:
+            logger.info(m)
+    elif status == "SUCCESS":
+        msg = [
+            line,
+            "【恭喜！代码已成功更新至最新版本！】(Update Success)",
+            line,
+            "本次更新已顺利完成，冲突资源与配置已安全处理与合并。",
+            "若更新了核心框架模块，请重启 Bot 使其生效！",
+            line
+        ]
+        for m in msg:
+            logger.info(m)
     else:
-        logger.info("未配置代理或代理为空...")
-
-except Exception as e:
-    logger.error(f"无法配置 Git 代理: {e}")
-
-custom_python_path = os.path.join(parent_dir, "environments", "Python311", "python.exe")
-
-python_path = sys.executable
-logger.info(f"python_path: {python_path}")
-try:
-    from pip._internal.cli.main import main as pip_main
-except ImportError as e:
-    logger.info("Cannot import pip")
-pip_main(['config', 'set', 'global.index-url', 'https://mirrors.aliyun.com/pypi/simple/'])
+        msg = [
+            line,
+            "【注意：未能完全更新至最新版本】(Update Incomplete)",
+            line,
+            "更新过程中可能遇到了未自动解决的冲突或网络波动。",
+            f"原因/详情: {detail}" if detail else "请检查网络连接、Git 代理或查看上方的详细日志。",
+            "我们已尽力保障您的 yaml 配置文件安全，没有丢失。",
+            line
+        ]
+        for m in msg:
+            logger.error(m)
 
 
-async def main():
-    logger.info("""请输入要执行的指令：
-        [1].youtube登录
-        [2].更新bot代码(常用)
-        [3].playwright工具安装
-        [4].开发者工具
-        [5].若只的检测相关ai库(如奶龙检测)
-        [6].B站 or 抖音 or 小红书 登录。不登也不影响你用
-        [7].导出配置文件
-        [8].导入配置文件
-        [9].更新jmcomic库(当代理正常但jm功能不可用时请自助更新)
-        [10].退出""")
-    user_input = input("请输入指令序号：")
-    if user_input == "1":
-        logger.info("youtube登录")
-        logger.warning(
-            """
-            \n
-            youtube登录需要手动操作，请按照以下步骤进行：
-            0.等待链接出现
-            1.打开链接
-            2.输入input code 后面的代码
-            3.继续使用你的google账号登录
-            4.完成后，在这个页面按回车(等待结束后自动退出)
-            """
-        )
-        # 获取必要参数
+def run_git_command(args: list) -> tuple:
+    full_cmd = [git_path] + args
+    try:
+        p = subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = p.communicate()
+        out_str = stdout.decode('utf-8', errors='ignore')
+        err_str = stderr.decode('utf-8', errors='ignore')
+        return p.returncode, out_str, err_str
+    except Exception as e:
+        return -1, "", str(e)
+
+
+def is_git_up_to_date(stdout: str, stderr: str) -> bool:
+    combined = (stdout + "\n" + stderr).lower()
+    return "already up to date" in combined or "已经是最新" in combined or "已经是最新版本" in combined
+
+
+def is_git_pull_success(returncode: int, stdout: str, stderr: str) -> bool:
+    if is_git_up_to_date(stdout, stderr):
+        return True
+    combined = (stdout + "\n" + stderr).lower()
+    if returncode == 0:
+        if "conflict" not in combined and "error:" not in combined and "fatal:" not in combined:
+            return True
+    if "updating " in combined and "files changed" in combined and "error:" not in combined and "fatal:" not in combined:
+        return True
+    return False
+
+
+def parse_git_conflicts(output: str) -> list:
+    files = set()
+    lines = output.splitlines()
+    in_overwrite_block = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        m = re.search(r'error:\s*Your local changes to the following files would be overwritten by merge:\s*', stripped, re.IGNORECASE)
+        if m or "下列文件的本地更改将被合并覆盖" in stripped or "would be overwritten by merge" in stripped:
+            in_overwrite_block = True
+            continue
+
+        if in_overwrite_block:
+            if stripped.startswith("Please commit your changes") or stripped.startswith("Aborting") or stripped.startswith("请在合并前提交") or stripped.startswith("终止"):
+                in_overwrite_block = False
+                continue
+            if stripped and not stripped.startswith("error:") and not stripped.startswith("fatal:"):
+                files.add(stripped.replace("\\", "/"))
+                continue
+
+        m = re.search(r'error:\s*The following untracked working tree files would be overwritten by merge:\s*', stripped, re.IGNORECASE)
+        if m or "下列未跟踪的工作区文件将被合并覆盖" in stripped:
+            in_overwrite_block = True
+            continue
+
+        m = re.search(r'CONFLICT\s*\(.*?\):\s*Merge conflict in\s+(.*)', stripped, re.IGNORECASE)
+        if m:
+            files.add(m.group(1).strip().replace("\\", "/"))
+            continue
+
+        m = re.search(r'conflict in\s+(.*)', stripped, re.IGNORECASE)
+        if m:
+            files.add(m.group(1).strip().replace("\\", "/"))
+            continue
+
+        m = re.search(r'CONFLICT\s*\(modify/delete\):\s*(.*?)\s+deleted in', stripped, re.IGNORECASE)
+        if m:
+            files.add(m.group(1).strip().replace("\\", "/"))
+            continue
+
+        m = re.search(r'error:\s*unable to unlink\s+[\'"]?(.*?)[\'"]?:\s*', stripped, re.IGNORECASE)
+        if m:
+            files.add(m.group(1).strip().replace("\\", "/"))
+            continue
+
+    clean_files = []
+    for f in files:
+        f_clean = f.strip().strip("'\"")
+        if f_clean and not f_clean.startswith("fatal:") and not f_clean.startswith("error:"):
+            clean_files.append(f_clean)
+    return clean_files
+
+
+def clean_and_backup_file(file_path: str, backed_up_yamls: dict) -> bool:
+    if not os.path.exists(file_path):
+        return True
+
+    normalized = file_path.replace("\\", "/")
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext in [".yaml", ".yml"]:
+        try:
+            os.makedirs(YAML_BACKUP_DIR, exist_ok=True)
+            safe_name = normalized.replace("/", "__")
+            backup_path = os.path.join(YAML_BACKUP_DIR, safe_name)
+            shutil.copy2(file_path, backup_path)
+            backed_up_yamls[normalized] = backup_path
+            logger.info(f"已安全备份本地配置文件: {file_path} -> {backup_path}")
+            os.remove(file_path)
+            return True
+        except Exception as e:
+            logger.error(f"备份或移除本地 yaml 文件失败: {file_path}, error: {e}")
+            return False
+    else:
+        try:
+            if os.path.isdir(file_path):
+                shutil.rmtree(file_path, ignore_errors=True)
+            else:
+                os.remove(file_path)
+            logger.warning(f"为排除拉取冲突，已自动清理冲突资源文件: {file_path}")
+            return True
+        except Exception as e:
+            logger.error(f"清理冲突资源文件失败: {file_path}, error: {e}")
+            return False
+
+
+def restore_or_merge_yamls(backed_up_yamls: dict, pull_succeeded: bool):
+    if not backed_up_yamls:
+        return
+
+    logger.info("开始处理暂存备份的配置文件...")
+    for orig_rel_path, backup_path in list(backed_up_yamls.items()):
+        if not os.path.exists(backup_path):
+            continue
+
+        if pull_succeeded:
+            if os.path.exists(orig_rel_path):
+                logger.info(f"正在智能合并配置更新: {orig_rel_path}")
+                try:
+                    conflict_file_dealter(backup_path, orig_rel_path)
+                    logger.info(f"配置文件合并成功: {orig_rel_path}")
+                except Exception as e:
+                    logger.error(f"合并配置文件失败 {orig_rel_path}: {e}，将保留原配置")
+                    try:
+                        shutil.copy2(backup_path, orig_rel_path)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(orig_rel_path)), exist_ok=True)
+                    shutil.copy2(backup_path, orig_rel_path)
+                    logger.info(f"远程无新同名配置，已完整还原原配置文件: {orig_rel_path}")
+                except Exception as e:
+                    logger.error(f"还原原配置文件失败: {orig_rel_path}, error: {e}")
+        else:
+            if not os.path.exists(orig_rel_path):
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(orig_rel_path)), exist_ok=True)
+                    shutil.copy2(backup_path, orig_rel_path)
+                    logger.warning(f"更新未成功，已安全恢复原配置文件: {orig_rel_path}")
+                except Exception as e:
+                    logger.error(f"恢复原配置文件失败: {orig_rel_path}, error: {e}")
+
+
+def is_ai_configured() -> bool:
+    try:
         from framework_common.framework_util.yamlLoader import YAMLManager
+        ym = YAMLManager.get_instance()
+        if not hasattr(ym, "mai_reply"):
+            return False
+        cfg = ym.mai_reply.config
+        if not cfg or not cfg.get("enable", True):
+            return False
+        llm = cfg.get("llm", {})
+        provider = llm.get("provider", "openai")
+        provider_cfg = llm.get(provider, {})
+        keys = provider_cfg.get("api_keys", [])
+        if not keys:
+            return False
+        first_key = str(keys[0]).strip()
+        if not first_key or first_key in ["xxx", "YOUR_GEMINI_API_KEY", "YOUR_OPENAI_API_KEY"]:
+            return False
+        return True
+    except Exception:
+        return False
 
-        yamlmanager = YAMLManager.get_instance()
-        proxy = yamlmanager.common_config.basic_config.get("proxy").get("http_proxy")
-        pyproxies = {  # pytubefix代理
-            "http": proxy,
-            "https": proxy
+
+def ai_solve_git_update(source_url: str, initial_stdout: str, initial_stderr: str) -> tuple:
+    try:
+        from framework_common.framework_util.yamlLoader import YAMLManager
+        from run.mai_reply.service.llm_client import LLMClient
+        ym = YAMLManager.get_instance()
+        client = LLMClient(ym)
+    except Exception as e:
+        logger.error(f"初始化 AI 客户端失败: {e}")
+        return False, f"AI 初始化失败: {e}"
+
+    backed_up_yamls = {}
+    history = []
+
+    system_prompt = (
+        "你是一个专业的 Git 诊断与自动化更新解决助手。当前用户正在更新开源项目，但遇到了 Git 冲突或错误。\n"
+        "请记住：用户是技术小白，你需要全自动调用工具解决问题，直至成功 pull 到最新代码。\n"
+        "规则：\n"
+        "1. 遇到 gif, png, jpg, txt, py 等非 yaml 资源或代码冲突，调用 clean_conflicts 直接删除它们，以便顺利更新。\n"
+        "2. 遇到 yaml, yml 配置文件，必须调用 clean_conflicts（系统会自动将其备份并在更新后进行安全合并，绝不丢失配置）。\n"
+        "3. 在清理冲突文件后，必须再次调用 git_pull 尝试拉取。\n"
+        "4. 如果更新已经是最新 (already up to date) 或更新成功，向用户汇报已成功。\n"
+        "5. 最多进行 5 轮交互，不要死循环。"
+    )
+
+    tools_schema = [
+        {
+            "name": "clean_conflicts",
+            "description": "清理导致 Git 冲突的文件或目录。对于 yaml 文件会自动备份以便后续合并，对于 gif/png/txt/py 等文件会直接移除以允许 pull。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要清理的冲突文件或目录相对路径列表，例如 ['run/test.gif', 'config.yaml']"
+                    }
+                },
+                "required": ["file_paths"]
+            }
+        },
+        {
+            "name": "git_pull",
+            "description": "执行 git pull 操作从指定源拉取最新代码。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_url": {
+                        "type": "string",
+                        "description": "Git 远程仓库地址"
+                    }
+                }
+            }
+        },
+        {
+            "name": "git_status",
+            "description": "查看当前的 git status 输出。",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "git_abort_merge",
+            "description": "如果处于冲突的 merge 状态，执行 git merge --abort 回滚合并状态。",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "git_checkout_file",
+            "description": "放弃某些本地未提交文件的更改，将其还原为 HEAD 版本。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要还原的文件路径列表"
+                    }
+                },
+                "required": ["file_paths"]
+            }
         }
-
-        from pytubefix import YouTube
-        from pytubefix.helpers import reset_cache
-        reset_cache()
-
-        yt = YouTube(url="https://www.youtube.com/watch?v=PZnXXFrjSjg", client='IOS', proxies=pyproxies, use_oauth=True,
-                     allow_oauth_cache=True)
-        ys = yt.streams.get_audio_only()
-        # ys.download(output_path="data/voice/cache/", filename="PZnXXFrjSjg")
-    elif user_input == "2":
-        updaat()
-    elif user_input == "3":
-        logger.info("playwright工具安装(b站动态爬取需要)")
-        os.system(f"\"{python_path}\" -m playwright install chromium")
-    elif user_input == "4":
-        logger.info("""请输入开发者工具序号：
-#
-        2 没想好呢""")
-        user_input2 = input("请输入开发者工具序号：")
-        '''if user_input2=="1":
-            logger.info("同步gemini函数调用到openai函数调用")
-            r = gemini_func_map()
-            convert_gemini_to_openai(r)
-            logger.info("同步完成")'''
-    elif user_input == "5":
-        logger.info("安装奶龙相关ai库依赖中")
-        ai_req()
-    elif user_input == "6":
-
-        PyExecJS = install_and_import("PyExecJS")
-        gi = install_and_import("PyGObject", "gi")
-
-        from run.streaming_media.service.Link_parsing.core.login_core import login_core_select
-        await login_core_select()
-    elif user_input == "7":
-        logger.info("导出配置文件")
-        export_yaml()
-        logger.info("配置文件导出完成")
-        logger.warning("请将old_yamls文件夹复制到新的Eridanus目录下。如有必要，请自行覆盖新的data文件夹")
-    elif user_input == "8":
-        logger.info("导入配置文件")
-        import_yaml()
-        logger.info("配置文件导入完成")
-    elif user_input=="9":
-        pip_main(['install', '--upgrade', 'jmcomic'])
-
-
-def updaat(f=False, source=None, yamls:dict=None):
-    if not yamls:
-        yamls = {}
-    sources = [
-        "https://github.com/avilliai/Eridanus.git",
-        "https://gitcode.com/faasf/Eridanus.git",
-        "https://github.akams.cn/https://github.com/avilliai/Eridanus.git",
-        "https://mirror.ghproxy.com/https://github.com/avilliai/Eridanus",
-        "https://ghfast.top/https://github.com/avilliai/Eridanus.git",
-        "https://gh.llkk.cc/https://github.com/avilliai/Eridanus.git"
     ]
+
+    initial_log = f"Git pull 输出日志：\nSTDOUT:\n{initial_stdout}\nSTDERR:\n{initial_stderr}\n当前更新源 URL: {source_url}"
+    history.append({"role": "user", "content": initial_log})
+
+    success = False
+    detail = ""
+
+    for step in range(5):
+        logger.info(f"AI 正在思考诊断方案（第 {step + 1} 轮）...")
+        try:
+            resp = asyncio.run(client.chat(
+                history=history,
+                system_prompt=system_prompt,
+                tools=tools_schema
+            ))
+        except Exception as e:
+            logger.error(f"AI 诊断请求异常: {e}")
+            break
+
+        tool_calls = resp.tool_calls or []
+        content = resp.content or ""
+        if content:
+            logger.info(f"AI 提示: {content}")
+
+        history.append({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": tool_calls
+        })
+
+        if not tool_calls:
+            detail = content
+            break
+
+        for tc in tool_calls:
+            tname = tc.get("function", {}).get("name") or tc.get("name")
+            targs = tc.get("function", {}).get("arguments") or tc.get("args") or {}
+            if isinstance(targs, str):
+                import json
+                try:
+                    targs = json.loads(targs)
+                except Exception:
+                    targs = {}
+
+            call_id = tc.get("id", f"call_{tname}_{step}")
+            logger.info(f"AI 执行工具调用: {tname}({targs})")
+
+            tool_result = ""
+            if tname == "clean_conflicts":
+                fps = targs.get("file_paths", [])
+                cleaned = []
+                for fp in fps:
+                    if clean_and_backup_file(fp, backed_up_yamls):
+                        cleaned.append(fp)
+                tool_result = f"已清理文件: {cleaned}"
+
+            elif tname == "git_pull":
+                target_url = targs.get("source_url") or source_url
+                code, out, err = run_git_command(["pull", target_url])
+                if is_git_pull_success(code, out, err):
+                    success = True
+                    tool_result = f"Pull 成功！\nSTDOUT: {out}\nSTDERR: {err}"
+                else:
+                    tool_result = f"Pull 仍有错误或未完成。\nReturncode: {code}\nSTDOUT: {out}\nSTDERR: {err}"
+
+            elif tname == "git_status":
+                code, out, err = run_git_command(["status"])
+                tool_result = f"Git Status:\n{out}\n{err}"
+
+            elif tname == "git_abort_merge":
+                code, out, err = run_git_command(["merge", "--abort"])
+                tool_result = f"Git merge --abort 执行完成: {out} {err}"
+
+            elif tname == "git_checkout_file":
+                fps = targs.get("file_paths", [])
+                code, out, err = run_git_command(["checkout", "--"] + fps)
+                tool_result = f"Checkout 结果: {out} {err}"
+            else:
+                tool_result = f"未知工具: {tname}"
+
+            history.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": str(tool_result)
+            })
+
+            if success:
+                break
+
+        if success:
+            break
+
+    restore_or_merge_yamls(backed_up_yamls, pull_succeeded=success)
+    return success, detail
+
+
+def heuristic_solve_git_update(source_url: str, initial_stdout: str, initial_stderr: str) -> tuple:
+    backed_up_yamls = {}
+    last_stdout = initial_stdout
+    last_stderr = initial_stderr
+
+    for round_idx in range(4):
+        logger.info(f"正在使用启发式规则排查更新冲突（第 {round_idx + 1} 轮）...")
+        conflict_files = parse_git_conflicts(last_stdout + "\n" + last_stderr)
+        if not conflict_files:
+            code, status_out, status_err = run_git_command(["status", "--porcelain"])
+            for line in status_out.splitlines():
+                if line.startswith("UU ") or line.startswith("AA "):
+                    conflict_files.append(line[3:].strip())
+
+        if not conflict_files:
+            logger.info("未识别出具体冲突文件，尝试直接重新拉取...")
+            code, out, err = run_git_command(["pull", source_url])
+            last_stdout, last_stderr = out, err
+            if is_git_pull_success(code, out, err):
+                restore_or_merge_yamls(backed_up_yamls, pull_succeeded=True)
+                return True, "拉取成功"
+            break
+
+        logger.warning(f"检测到以下引起冲突的文件/目录: {conflict_files}")
+        for cf in conflict_files:
+            clean_and_backup_file(cf, backed_up_yamls)
+
+        code, out, err = run_git_command(["pull", source_url])
+        last_stdout, last_stderr = out, err
+        if is_git_pull_success(code, out, err):
+            logger.info("清理冲突后重新拉取成功！")
+            restore_or_merge_yamls(backed_up_yamls, pull_succeeded=True)
+            return True, "拉取成功"
+
+    code, out, err = run_git_command(["pull", source_url])
+    final_success = is_git_pull_success(code, out, err)
+    restore_or_merge_yamls(backed_up_yamls, pull_succeeded=final_success)
+    detail = (out + "\n" + err).strip()
+    return final_success, detail
+
+
+def execute_smart_update(source_idx: int = 0, non_interactive: bool = False) -> tuple:
+    if source_idx < 0 or source_idx >= len(SOURCES):
+        source_idx = 0
+    source_url = SOURCES[source_idx]
+
+    logger.info(f"开始从源 [{source_idx}] {source_url} 拉取更新...")
+    code, stdout, stderr = run_git_command(["pull", source_url])
+
+    logger.info(stdout)
+    if stderr:
+        logger.warning(stderr)
+
+    if is_git_up_to_date(stdout, stderr):
+        print_result_banner("UP_TO_DATE")
+        return "UP_TO_DATE", "当前已经是最新版本，无需更新。"
+
+    if is_git_pull_success(code, stdout, stderr):
+        print_result_banner("SUCCESS")
+        return "SUCCESS", "更新成功，已拉取到最新代码。"
+
+    logger.warning("首轮 git pull 未直接成功，正在启动智能冲突处理机制...")
+
+    if is_ai_configured():
+        logger.info("检测到 MaiReply 已配置可用 AI 大模型，优先交由 AI 自主分析与解决 Git 冲突...")
+        try:
+            ai_success, detail = ai_solve_git_update(source_url, stdout, stderr)
+            if ai_success:
+                print_result_banner("SUCCESS")
+                return "SUCCESS", "AI 成功协助解决更新冲突并拉取到最新版本。"
+            else:
+                logger.warning(f"AI 处理未完全成功 ({detail})，将自动回退到规则启发式处理...")
+        except Exception as e:
+            logger.error(f"AI 处理过程发生异常: {e}，回退到规则启发式处理...")
+
+    heur_success, detail = heuristic_solve_git_update(source_url, stdout, stderr)
+    if heur_success:
+        print_result_banner("SUCCESS")
+        return "SUCCESS", "通过冲突文件自动清理与配置合并，已成功更新至最新代码。"
+    else:
+        print_result_banner("FAILED", detail)
+        return "FAILED", f"未能自动解决冲突更新失败: {detail}"
+
+
+def restart_bot_process():
+    logger.info("准备重启 Bot 进程以使新代码生效...")
+    bat_path = os.path.abspath("启动脚本.bat")
+    try:
+        if os.path.exists(bat_path):
+            subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        else:
+            subprocess.Popen([sys.executable, "main.py"], creationflags=subprocess.CREATE_NEW_CONSOLE)
+    except Exception as e:
+        logger.error(f"拉起新 Bot 进程异常: {e}")
+
+    time.sleep(1.5)
+    os._exit(0)
+
+
+async def admin_update_system(bot, event, config):
+    try:
+        from framework_common.framework_util.yamlLoader import YAMLManager
+        ym = YAMLManager.get_instance()
+        master_id = ym.common_config.basic_config.get("master", {}).get("id")
+    except Exception:
+        master_id = None
+
+    sender_id = getattr(event, "user_id", None)
+    if master_id and sender_id and int(sender_id) != int(master_id):
+        await bot.send(event, "抱歉，系统更新功能仅限 Bot 管理员执行！")
+        return
+
+    source_idx = 0
+    try:
+        from framework_common.framework_util.yamlLoader import YAMLManager
+        ym = YAMLManager.get_instance()
+        source_idx = int(ym.common_config.basic_config.get("git_update_source", 0))
+    except Exception:
+        source_idx = 0
+
+    await bot.send(event, f"收到更新指令！已启动后台智能更新流程（使用源序号: {source_idx}）...\n完成后将通过私信向您汇报结果并自动重启。")
+
+    async def _bg_update_task():
+        try:
+            status, detail = await asyncio.to_thread(execute_smart_update, source_idx, True)
+            if status in ["UP_TO_DATE", "SUCCESS"]:
+                report_msg = (
+                    f"【系统更新报告】\n"
+                    f"状态: {'已经是最新版本' if status == 'UP_TO_DATE' else '更新成功'}\n"
+                    f"详情: {detail}\n"
+                    f"Bot 将在 3 秒后自动重启以载入新模块..."
+                )
+            else:
+                report_msg = (
+                    f"【系统更新报告】\n"
+                    f"状态: 更新失败\n"
+                    f"详情: {detail}\n"
+                    f"配置文件已安全保护，请根据日志排查。"
+                )
+
+            if master_id:
+                try:
+                    await bot.send_friend_message(int(master_id), report_msg)
+                except Exception as e:
+                    logger.error(f"向管理员发送更新报告私信失败: {e}")
+                    try:
+                        await bot.send(event, report_msg)
+                    except Exception:
+                        pass
+
+            if status in ["UP_TO_DATE", "SUCCESS"]:
+                await asyncio.sleep(2)
+                restart_bot_process()
+        except Exception as e:
+            logger.error(f"后台更新任务异常: {e}")
+            if master_id:
+                try:
+                    await bot.send_friend_message(int(master_id), f"系统更新发生严重异常: {e}")
+                except Exception:
+                    pass
+
+    asyncio.create_task(_bg_update_task())
+
+
+def updaat(f=False, source=None, yamls: dict = None):
+    sources = SOURCES
     if source is None:
         for i in sources:
             logger.info(f"{sources.index(i)}. {i}")
         logger.info("拉取bot代码\n--------------------")
         logger.warning("0为git源,1为gitcode源，其他镜像源可能存在版本滞后现象。如拉取失败可自行为environments/MinGit/cmd/git.exe配置代理(windows)。")
-        source = input("选择更新源(输入数字 )：")
+        source = input("选择更新源(输入数字 )：").strip()
 
-    if source.isdigit():
-        source = int(source)
-        if source < 0 or source > len(sources):
-            logger.error("无效输入，重新执行")
-            updaat()
-        # os.system("git pull https://github.com/avilliai/Manyana.git")
-        # 启动进程
-        p = subprocess.Popen([f'{git_path}', 'pull', sources[source]], stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE)
-
-    else:
+    try:
+        source_idx = int(source)
+    except Exception:
         logger.error("无效输入，重新执行")
-        updaat()
-    # 获取进程的输出和错误信息
-    stdout, stderr = p.communicate()
-    stdout = stdout.decode('utf-8', errors='ignore')
-    stderr = stderr.decode('utf-8', errors='ignore')
-    logger.info(stdout)
-    logger.warning(stderr)
+        return updaat(f, None, yamls)
 
-    # 标记是否在错误信息中
-    in_error_info = False
+    if source_idx < 0 or source_idx >= len(sources):
+        logger.error("无效输入，重新执行")
+        return updaat(f, None, yamls)
 
-    # 存放冲突文件名的列表
-    conflict_files = []
-    if f:
-        if os.path.exists("./temp"):
-            for i in yamls:
-                logger.info("开始处理" + i)
-                if os.path.exists(i):
-                    conflict_file_dealter(yamls[i], i)
-                else:
-                    logger.warning("文件" + i + "于新代码中不存在，跳过")
-
-            # shutil.rmtree("./temp")
-        logger.info("处理冲突文件完成")
-        logger.info("旧的冲突文件被保存到了temp文件夹，以防万一你需要它们。")
-        '''logger.info("是否检查依赖？按任意键开始，如不需要请直接关闭此窗口。如后续启动报错，请返回此步骤并执行依赖检查。")
-        logger.warning("是否检查依赖？按任意键开始，如不需要请直接关闭此窗口。如后续启动报错，请返回此步骤并执行依赖检查。")
-        logger.error("是否检查依赖？按任意键开始，如不需要请直接关闭此窗口。如后续启动报错，请返回此步骤并执行依赖检查。")
-        input()
-        logger.warning("开始检查依赖....请不要关闭窗口")
-        logger.warning("开始检查依赖....请不要关闭窗口")
-        logger.warning("开始检查依赖....请不要关闭窗口")
-        logger.warning("开始检查依赖....请不要关闭窗口")
-        logger.warning("开始检查依赖....请不要关闭窗口")
-        check_requirements("requirements.txt")
-        logger.warning("依赖检查完成，开始依赖约束检查")
-        logger.error("出现红色、黄色警告一般为正常现象，请忽略")
-        logger.warning("出现红色、黄色警告一般为正常现象，请忽略")
-        logger.error("出现红色、黄色警告一般为正常现象，请忽略")
-        logger.warning("出现红色、黄色警告一般为正常现象，请忽略")
-        fuck_requirements()'''
-        logger.info("更新成功，请关闭此窗口，重新启动bot")
-        input()
-    # 逐行检查错误信息
-    for line in stderr.split('\n'):
-        # 标记冲突文件名开始位置
-        if 'error: Your local changes to the following files would be overwritten by merge:' in line:
-            in_error_info = True
-            continue  # 结束当前循环，进入下一个循环
-        elif 'error: 您对下列文件的本地修改将被合并操作覆盖：' in line:
-            in_error_info = True
-            continue
-        # 标记冲突文件名结束位置
-        if 'Please commit your changes or stash them before you merge.' in line:
-            in_error_info = False
-        elif '请在合并前提交或贮藏您的修改。' in line:
-            in_error_info = False
-        # 将冲突文件名添加到列表
-        if in_error_info:
-            conflict_files.append(line.strip())
-
-    for file in conflict_files:
-        print('冲突文件:', file)
-        logger.warning("开始处理冲突文件")
-        if file.endswith(".py"):
-            os.remove(file)
-            try:
-                shutil.os.remove(file)
-            except:
-                pass
-            logger.warning("移除了" + file)
-        elif file.endswith(".yaml"):
-            logger.info("冲突的配置文件" + file)
-            logger.warning("开始处理冲突文件.....读取中")
-            yamls[file] = f"temp/{file.replace('/', '_')}"
-            if not os.path.exists("./temp"):
-                os.mkdir("./temp")
-            try:
-                shutil.copyfile(file, f"temp/{file.replace('/', '_')}")
-                os.remove(file)
-                try:
-                    shutil.os.remove(file)
-                except:
-                    pass
-            except:
-                continue
-
-        else:
-            os.remove(file)
-            try:
-                shutil.os.remove(file)
-            except:
-                pass
-            logger.warning("移除了 " + file)
-            # logger.warning("请自行决定删除或修改文件名称，在重新拉取后根据旧文件重新填写新文件")
-    logger.warning("开始处理冲突文件")
-    logger.info("即将再次执行拉取操作")
-    updaat(True, str(source), yamls)
-
-    p.wait()
-
-    logger.info("结束")
-    logger.info("如更新成功请自行查看 更新日志.yaml")
-
-
-try:
-    from ruamel.yaml import YAML
-except Exception as e:
-    logger.error("未安装ruamel.yaml库，无法处理冲突文件，开始安装缺少的依赖")
-    pip_main(['install', 'ruamel.yaml'])
-    from ruamel.yaml import YAML
-# 创建一个YAML对象来加载和存储YAML数据
-yaml = YAML()
-yaml.preserve_quotes = True  # 保留引号
-yaml.indent(mapping=2, sequence=4, offset=2)  # 设置缩进样式
-
-
-def merge_dicts(old, new):
-    for k, v in old.items():
-        # 如果值是一个字典，并且键在新的yaml文件中，那么我们就递归地更新键值对
-        if isinstance(v, dict) and k in new and isinstance(new[k], dict):
-            merge_dicts(v, new[k])
-        # 如果值是列表，且新旧值都是列表，则合并并去重
-        elif isinstance(v, list) and k in new and isinstance(new[k], list):
-            if k in ["api_keys","sdUrl","其他默认绘图参数","card_index","steam_api_key","nano_banana_key","固定入群欢迎","apikey"]:  # 特殊处理, 保留旧值
-                logger.info(f"覆盖列表 key: {k}")
-                new[k] = v  # 使用旧的列表覆盖新的列表
-            elif k.startswith("page"):
-                logger.warning(f"当前任务为菜单，使用最新配置覆盖旧配置。")
-            else:
-                logger.info(f"合并列表 key: {k}")
-                try:
-                    new[k] = list(dict.fromkeys(new[k] + v))  # 保持顺序去重
-                except:
-                    logger.error("沟槽的出错了，默认用最新配置")
-        # 如果键在新的yaml文件中，但值类型不同，以新值为准
-        elif k in new and type(v) != type(new[k]):
-            logger.info(f"类型冲突，保留新的值 key: {k}, old value type: {type(v)}, new value type: {type(new[k])}")
-            continue  # 跳过对新值的覆盖
-        # 如果键在新的yaml文件中且类型一致，则更新值
-        elif k in new:
-            logger.info(f"更新 key: {k}, old value: {v}, new value: {new[k]}")
-            new[k] = v
-        # 如果键不在新的yaml中，直接添加
-        else:
-            # 特殊处理，保留旧值,这样像bili动态监测之类的东西不会被刷掉
-            if isinstance(k,int):
-                logger.warning(f"key: {k} 类型为int，暂时保留")
-                new[k] = v
-            else:
-                logger.info(f"移除键 key: {k}, value: {v}")
-
-
-def conflict_file_dealter(file_old='old_aiReply.yaml', file_new='new_aiReply.yaml'):
-    # 加载旧的YAML文件
-    with open(file_old, 'r', encoding="utf-8") as file:
-        old_data = yaml.load(file)
-
-    # 加载新的YAML文件
-    with open(file_new, 'r', encoding="utf-8") as file:
-        new_data = yaml.load(file)
-
-    # 遍历旧的YAML数据并更新新的YAML数据中的相应值
-    merge_dicts(old_data, new_data)
-
-    # 把新的YAML数据保存到新的文件中，保留注释
-    with open(file_new, 'w', encoding="utf-8") as file:
-        yaml.dump(new_data, file)
-
-
-"""
-依赖检测
-"""
-
+    execute_smart_update(source_idx=source_idx, non_interactive=False)
 
 def fuck_requirements():
     from ruamel.yaml import YAML
@@ -564,5 +901,82 @@ def import_yaml(base_dir="run"):
             continue
     if failed_files:
         logger.warning(f"以下文件处理失败：{failed_files}，建议手动处理")
+async def main():
+    setup_git_proxy_if_interactive()
+    logger.info("""请输入要执行的指令：
+        [1].youtube登录
+        [2].更新bot代码(常用)
+        [3].playwright工具安装
+        [4].开发者工具
+        [5].若只的检测相关ai库(如奶龙检测)
+        [6].B站 or 抖音 or 小红书 登录。不登也不影响你用
+        [7].导出配置文件
+        [8].导入配置文件
+        [9].更新jmcomic库(当代理正常但jm功能不可用时请自助更新)
+        [10].退出""")
+    user_input = input("请输入指令序号：").strip()
+    if user_input == "1":
+        logger.info("youtube登录")
+        logger.warning(
+            """
+            \n
+            youtube登录需要手动操作，请按照以下步骤进行：
+            0.等待链接出现
+            1.打开链接
+            2.输入input code 后面的代码
+            3.继续使用你的google账号登录
+            4.完成后，在这个页面按回车(等待结束后自动退出)
+            """
+        )
+        from framework_common.framework_util.yamlLoader import YAMLManager
+
+        yamlmanager = YAMLManager.get_instance()
+        proxy = yamlmanager.common_config.basic_config.get("proxy", {}).get("http_proxy")
+        pyproxies = {
+            "http": proxy,
+            "https": proxy
+        }
+
+        from pytubefix import YouTube
+        from pytubefix.helpers import reset_cache
+        reset_cache()
+
+        yt = YouTube(url="https://www.youtube.com/watch?v=PZnXXFrjSjg", client='IOS', proxies=pyproxies, use_oauth=True,
+                     allow_oauth_cache=True)
+        ys = yt.streams.get_audio_only()
+    elif user_input == "2":
+        updaat()
+    elif user_input == "3":
+        logger.info("playwright工具安装(b站动态爬取需要)")
+        os.system(f"\"{python_path}\" -m playwright install chromium")
+    elif user_input == "4":
+        logger.info("""请输入开发者工具序号：
+#
+        2 没想好呢""")
+        input("请输入开发者工具序号：")
+    elif user_input == "5":
+        logger.info("安装奶龙相关ai库依赖中")
+        ai_req()
+    elif user_input == "6":
+        install_and_import("PyExecJS")
+        install_and_import("PyGObject", "gi")
+
+        from run.streaming_media.service.Link_parsing.core.login_core import login_core_select
+        await login_core_select()
+    elif user_input == "7":
+        logger.info("导出配置文件")
+        export_yaml()
+        logger.info("配置文件导出完成")
+        logger.warning("请将old_yamls文件夹复制到新的Eridanus目录下。如有必要，请自行覆盖新的data文件夹")
+    elif user_input == "8":
+        logger.info("导入配置文件")
+        import_yaml()
+        logger.info("配置文件导入完成")
+    elif user_input == "9":
+        if pip_main is not None:
+            pip_main(['install', '--upgrade', 'jmcomic'])
+    elif user_input == "10":
+        logger.info("退出")
+
 if __name__ == '__main__':
     asyncio.run(main())

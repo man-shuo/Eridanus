@@ -48,7 +48,7 @@ _lifecycle_started = False
 
 
 def _shutdown_existing_scheduler():
-    """若已有 scheduler 在运行则安全停止它。"""
+    """若已有 scheduler 在运行则安全停止它，同时停止并重置动态定时任务引擎。"""
     global _scheduler
     if _scheduler is not None and _scheduler.running:
         try:
@@ -56,6 +56,11 @@ def _shutdown_existing_scheduler():
         except Exception:
             pass
     _scheduler = None
+    try:
+        from framework_common.schedule_service import get_scheduler
+        get_scheduler().stop()
+    except Exception:
+        pass
 
 
 def main(bot: ExtendBot, config):

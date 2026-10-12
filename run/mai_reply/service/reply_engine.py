@@ -205,7 +205,10 @@ class ReplyEngine:
         event,
         clean_text: str,
         multimodal_content=None,
-        triggered_by_llm: bool = False,  # ← 新增：是否由 trigger_llm 触发
+        triggered_by_llm: bool = False,  # 是否由 trigger_llm 触发
+        include_tools: bool = True,       # 是否注入 tools（定时任务或纯问候可设为 False 节省大量 token）
+        tools_override: Optional[dict] = None,  # 自定义覆盖 tools 映射（按需仅传特定工具）
+        system_prompt_prefix: Optional[str] = None,  # 前置注入的系统指令提示词（明确系统定时事件来源，防抢台词误判）
     ) -> None:
         is_group = isinstance(event, GroupMessageEvent)
         group_id: Optional[int] = getattr(event, "group_id", None) if is_group else None
@@ -300,6 +303,8 @@ class ReplyEngine:
                 global_memory=self.context.get_global_memory(),
                 user_memory=self.context.get_user_memory(user_id),
             )
+            if system_prompt_prefix:
+                system_prompt = f"{system_prompt_prefix.strip()}\n\n{system_prompt}"
 
             max_turns = self.cfg.mai_reply.config.get("context", {}).get("max_turns", 20)
             max_history_msgs = max_turns * 2
@@ -326,7 +331,12 @@ class ReplyEngine:
                 sent_reply_parts.append(text)
                 sent_reply_segments.extend(segments)
 
-            active_tools = self._active_tools()
+            if not include_tools:
+                active_tools = None
+            elif tools_override is not None:
+                active_tools = tools_override
+            else:
+                active_tools = self._active_tools()
             raw_reply = await self.llm.chat(
                 messages=messages,
                 system_prompt=system_prompt,
