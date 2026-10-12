@@ -3,7 +3,7 @@
 image_search:
   sauceno_api_key: ""          #sauceno搜图api，你可以从https://saucenao.com/user.php注册并获取
 nasa_api:
-  api_key: ""   #nasa的每日天文api 从https://api.nasa.gov/index.html#main-content申请
+  api_key: ""   #nasa每日天文api https://api.nasa.gov/index.html#main-content??
 setu:
   r18mode: true
   download: true #关掉的话就是直接发送url，灰度图不生效。

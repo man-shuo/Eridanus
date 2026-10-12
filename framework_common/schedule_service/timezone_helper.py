@@ -1,178 +1,304 @@
 # -*- coding: utf-8 -*-
 """
 timezone_helper.py
-时区与城市换算辅助模块：
-- 支持城市名与主流中英文城市字典匹配
-- 支持中文时区描述（东八区、西五区等）与 UTC/GMT 偏移量智能解析
-- 自动将目标时区的指定时间换算为 Bot 所在服务器时区（默认 Asia/Shanghai，东八区）的执行时间
+????????????
+- ?????????????????
+- ??????????????????? UTC/GMT ???????
+- ???????????? Castro Valley?Irvine?Waterloo ?????? Open-Meteo ???? API ????????????????
+- ??????????????? Bot ?????????? Asia/Shanghai??????????
 """
 
+import os
 import re
+import sqlite3
 import datetime
 from typing import Optional, Tuple, Dict, Any, List
 from dateutil import tz
 
+try:
+    import requests
+except ImportError:
+    requests = None
+
 DEFAULT_BOT_TZ_NAME = "Asia/Shanghai"
 DEFAULT_BOT_OFFSET_HOURS = 8.0
 
-# 常见城市/地区到 IANA 时区名称映射表
+CACHE_DB_PATH = os.path.join("data", "dataBase", "dynamic_schedules.db")
+
+# ????/??? IANA ???????
 CITY_TO_TZ_MAP: Dict[str, str] = {
-    # 中国主要城市（统一中国标准时间 UTC+8）
-    "北京": "Asia/Shanghai",
-    "上海": "Asia/Shanghai",
-    "广州": "Asia/Shanghai",
-    "深圳": "Asia/Shanghai",
-    "杭州": "Asia/Shanghai",
-    "成都": "Asia/Shanghai",
-    "重庆": "Asia/Shanghai",
-    "武汉": "Asia/Shanghai",
-    "西安": "Asia/Shanghai",
-    "南京": "Asia/Shanghai",
-    "天津": "Asia/Shanghai",
-    "郑州": "Asia/Shanghai",
-    "长沙": "Asia/Shanghai",
-    "沈阳": "Asia/Shanghai",
-    "青岛": "Asia/Shanghai",
-    "济南": "Asia/Shanghai",
-    "哈尔滨": "Asia/Shanghai",
-    "大连": "Asia/Shanghai",
-    "厦门": "Asia/Shanghai",
-    "福州": "Asia/Shanghai",
-    "通辽": "Asia/Shanghai",
-    "苏州": "Asia/Shanghai",
-    "合肥": "Asia/Shanghai",
-    "东莞": "Asia/Shanghai",
-    "佛山": "Asia/Shanghai",
-    "无锡": "Asia/Shanghai",
-    "昆明": "Asia/Shanghai",
-    "长春": "Asia/Shanghai",
-    "石家庄": "Asia/Shanghai",
-    "南昌": "Asia/Shanghai",
-    "贵阳": "Asia/Shanghai",
-    "南宁": "Asia/Shanghai",
-    "乌鲁木齐": "Asia/Shanghai",
-    "兰州": "Asia/Shanghai",
-    "呼和浩特": "Asia/Shanghai",
-    "海口": "Asia/Shanghai",
-    "三亚": "Asia/Shanghai",
-    "银川": "Asia/Shanghai",
-    "西宁": "Asia/Shanghai",
-    "拉萨": "Asia/Shanghai",
-    "香港": "Asia/Hong_Kong",
-    "澳门": "Asia/Macau",
-    "台北": "Asia/Taipei",
-    "台湾": "Asia/Taipei",
+    # ??????????????? UTC+8?
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "???": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "???": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "????": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "????": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Shanghai",
+    "??": "Asia/Hong_Kong",
+    "??": "Asia/Macau",
+    "??": "Asia/Taipei",
+    "??": "Asia/Taipei",
 
-    # 俄罗斯主要城市
-    "莫斯科": "Europe/Moscow",
+    # ???????
+    "???": "Europe/Moscow",
     "moscow": "Europe/Moscow",
-    "圣彼得堡": "Europe/Moscow",
+    "????": "Europe/Moscow",
     "saint petersburg": "Europe/Moscow",
-    "符拉迪沃斯托克": "Asia/Vladivostok",
-    "海参崴": "Asia/Vladivostok",
+    "???????": "Asia/Vladivostok",
+    "???": "Asia/Vladivostok",
     "vladivostok": "Asia/Vladivostok",
-    "新西伯利亚": "Asia/Novosibirsk",
+    "?????": "Asia/Novosibirsk",
     "novosibirsk": "Asia/Novosibirsk",
-    "叶卡捷琳堡": "Asia/Yekaterinburg",
-    "伊尔库茨克": "Asia/Irkutsk",
+    "?????": "Asia/Yekaterinburg",
+    "?????": "Asia/Irkutsk",
     "irkutsk": "Asia/Irkutsk",
-    "下诺夫哥罗德": "Europe/Moscow",
-    "喀山": "Europe/Moscow",
-    "索契": "Europe/Moscow",
+    "??????": "Europe/Moscow",
+    "??": "Europe/Moscow",
+    "??": "Europe/Moscow",
 
-    # 日本
-    "东京": "Asia/Tokyo",
+    # ??
+    "??": "Asia/Tokyo",
     "tokyo": "Asia/Tokyo",
-    "大阪": "Asia/Tokyo",
+    "??": "Asia/Tokyo",
     "osaka": "Asia/Tokyo",
-    "京都": "Asia/Tokyo",
+    "??": "Asia/Tokyo",
     "kyoto": "Asia/Tokyo",
-    "名古屋": "Asia/Tokyo",
-    "横滨": "Asia/Tokyo",
-    "福冈": "Asia/Tokyo",
-    "札幌": "Asia/Tokyo",
+    "???": "Asia/Tokyo",
+    "??": "Asia/Tokyo",
+    "??": "Asia/Tokyo",
+    "??": "Asia/Tokyo",
 
-    # 韩国
-    "首尔": "Asia/Seoul",
+    # ??
+    "??": "Asia/Seoul",
     "seoul": "Asia/Seoul",
-    "釜山": "Asia/Seoul",
-    "仁川": "Asia/Seoul",
+    "??": "Asia/Seoul",
+    "??": "Asia/Seoul",
 
-    # 英国 & 欧洲
-    "伦敦": "Europe/London",
+    # ?? & ??
+    "??": "Europe/London",
     "london": "Europe/London",
-    "巴黎": "Europe/Paris",
+    "??": "Europe/Paris",
     "paris": "Europe/Paris",
-    "柏林": "Europe/Berlin",
+    "??": "Europe/Berlin",
     "berlin": "Europe/Berlin",
-    "法兰克福": "Europe/Berlin",
-    "罗马": "Europe/Rome",
+    "????": "Europe/Berlin",
+    "??": "Europe/Rome",
     "rome": "Europe/Rome",
-    "马德里": "Europe/Madrid",
-    "阿姆斯特丹": "Europe/Amsterdam",
-    "维也纳": "Europe/Vienna",
-    "苏黎世": "Europe/Zurich",
-    "日内瓦": "Europe/Zurich",
-    "斯德哥尔摩": "Europe/Stockholm",
-    "华沙": "Europe/Warsaw",
-    "基辅": "Europe/Kyiv",
+    "???": "Europe/Madrid",
+    "?????": "Europe/Amsterdam",
+    "???": "Europe/Vienna",
+    "???": "Europe/Zurich",
+    "???": "Europe/Zurich",
+    "?????": "Europe/Stockholm",
+    "??": "Europe/Warsaw",
+    "??": "Europe/Kyiv",
 
-    # 北美
-    "纽约": "America/New_York",
+    # ?????????????/?????
+    "??": "America/New_York",
     "new york": "America/New_York",
-    "华盛顿": "America/New_York",
+    "???": "America/New_York",
     "washington": "America/New_York",
-    "波士顿": "America/New_York",
-    "芝加哥": "America/Chicago",
+    "???": "America/New_York",
+    "boston": "America/New_York",
+    "???": "America/Chicago",
     "chicago": "America/Chicago",
-    "休斯顿": "America/Chicago",
-    "洛杉矶": "America/Los_Angeles",
+    "???": "America/Chicago",
+    "houston": "America/Chicago",
+    "???": "America/Chicago",
+    "dallas": "America/Chicago",
+    "???": "America/Los_Angeles",
     "los angeles": "America/Los_Angeles",
-    "旧金山": "America/Los_Angeles",
+    "???": "America/Los_Angeles",
     "san francisco": "America/Los_Angeles",
-    "西雅图": "America/Los_Angeles",
+    "???": "America/Los_Angeles",
     "seattle": "America/Los_Angeles",
-    "多伦多": "America/Toronto",
+    "???": "America/Los_Angeles",
+    "san jose": "America/Los_Angeles",
+    "???": "America/Los_Angeles",
+    "san diego": "America/Los_Angeles",
+    "??": "America/Los_Angeles",
+    "irvine": "America/Los_Angeles",
+    "???": "America/Los_Angeles",
+    "berkeley": "America/Los_Angeles",
+    "????": "America/Los_Angeles",
+    "palo alto": "America/Los_Angeles",
+    "???": "America/Los_Angeles",
+    "mountain view": "America/Los_Angeles",
+    "????": "America/Los_Angeles",
+    "cupertino": "America/Los_Angeles",
+    "????": "America/Los_Angeles",
+    "sunnyvale": "America/Los_Angeles",
+    "????": "America/Los_Angeles",
+    "fremont": "America/Los_Angeles",
+    "???": "America/Los_Angeles",
+    "oakland": "America/Los_Angeles",
+    "?????": "America/Los_Angeles",
+    "castro valley": "America/Los_Angeles",
+    "???": "America/Los_Angeles",
+    "hayward": "America/Los_Angeles",
+    "????": "America/Los_Angeles",
+    "san mateo": "America/Los_Angeles",
+    "???": "America/Toronto",
     "toronto": "America/Toronto",
-    "温哥华": "America/Vancouver",
+    "???": "America/Toronto",
+    "???": "America/Vancouver",
     "vancouver": "America/Vancouver",
 
-    # 东南亚 & 澳洲
-    "新加坡": "Asia/Singapore",
+    # ??? & ??
+    "???": "Asia/Singapore",
     "singapore": "Asia/Singapore",
-    "吉隆坡": "Asia/Kuala_Lumpur",
-    "曼谷": "Asia/Bangkok",
+    "???": "Asia/Kuala_Lumpur",
+    "kuala lumpur": "Asia/Kuala_Lumpur",
+    "??": "Asia/Bangkok",
     "bangkok": "Asia/Bangkok",
-    "清迈": "Asia/Bangkok",
-    "雅加达": "Asia/Jakarta",
-    "悉尼": "Australia/Sydney",
+    "??": "Asia/Bangkok",
+    "???": "Asia/Jakarta",
+    "??": "Australia/Sydney",
     "sydney": "Australia/Sydney",
-    "墨尔本": "Australia/Melbourne",
+    "???": "Australia/Melbourne",
     "melbourne": "Australia/Melbourne",
-    "布里斯班": "Australia/Brisbane",
-    "珀斯": "Australia/Perth",
-    "奥克兰": "Pacific/Auckland",
-
-    # 中东
-    "迪拜": "Asia/Dubai",
-    "dubai": "Asia/Dubai",
-    "阿布扎比": "Asia/Dubai",
+    "????": "Australia/Brisbane",
+    "??": "Australia/Perth",
+    "auckland": "Pacific/Auckland",
 }
 
-# 中文数字转数字映射（如“东八区” -> 8，“西五区” -> -5）
 CHINESE_ZONE_MAP = {
-    "零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
-    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
-    "十": 10, "十一": 11, "十二": 12,
+    "?": 0, "?": 1, "?": 2, "?": 3, "?": 4, "?": 5, "?": 6,
+    "?": 7, "?": 8, "?": 9, "?": 10, "??": 11, "??": 12,
 }
 
 
 class TimezoneHelper:
-    """时区解析与时间换算辅助类"""
+    """????????????"""
+
+    _mem_cache: Dict[str, str] = {}
+    _failed_queries: set = set()
+    _db_initialized: bool = False
+
+    @classmethod
+    def _ensure_cache_db(cls) -> None:
+        if cls._db_initialized:
+            return
+        try:
+            os.makedirs(os.path.dirname(CACHE_DB_PATH), exist_ok=True)
+            with sqlite3.connect(CACHE_DB_PATH, timeout=5.0) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS city_timezone_cache (
+                        city_key TEXT PRIMARY KEY,
+                        tz_name TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.commit()
+            cls._db_initialized = True
+        except Exception:
+            pass
+
+    @classmethod
+    def _get_cached_tz(cls, raw_key: str) -> Optional[str]:
+        if raw_key in cls._mem_cache:
+            return cls._mem_cache[raw_key]
+        cls._ensure_cache_db()
+        try:
+            with sqlite3.connect(CACHE_DB_PATH, timeout=3.0) as conn:
+                cur = conn.execute(
+                    "SELECT tz_name FROM city_timezone_cache WHERE city_key = ?",
+                    (raw_key,),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    cls._mem_cache[raw_key] = row[0]
+                    return row[0]
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _save_cached_tz(cls, raw_key: str, tz_name: str) -> None:
+        cls._mem_cache[raw_key] = tz_name
+        cls._ensure_cache_db()
+        try:
+            now_str = datetime.datetime.now().isoformat()
+            with sqlite3.connect(CACHE_DB_PATH, timeout=3.0) as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO city_timezone_cache (city_key, tz_name, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (raw_key, tz_name, now_str),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    @classmethod
+    def _query_remote_geocoding_tz(cls, city_query: str) -> Optional[str]:
+        """?? Open-Meteo ????????????????? IANA ????"""
+        raw_key = city_query.strip().lower()
+        if not raw_key or raw_key in cls._failed_queries or requests is None:
+            return None
+
+        url = "https://geocoding-api.open-meteo.com/v1/search"
+        for lang in ("zh", "en"):
+            try:
+                resp = requests.get(
+                    url,
+                    params={"name": city_query.strip(), "count": 1, "language": lang, "format": "json"},
+                    timeout=3.5,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results = data.get("results")
+                    if results and isinstance(results, list):
+                        tz_name = results[0].get("timezone")
+                        if tz_name and tz.gettz(tz_name) is not None:
+                            cls._save_cached_tz(raw_key, tz_name)
+                            return tz_name
+            except Exception:
+                continue
+
+        cls._failed_queries.add(raw_key)
+        return None
 
     @staticmethod
     def get_bot_timezone() -> datetime.tzinfo:
-        """获取 Bot 默认所在时区对象（默认 Asia/Shanghai，UTC+8）"""
+        """?? Bot ??????????? Asia/Shanghai?UTC+8?"""
         zone = tz.gettz(DEFAULT_BOT_TZ_NAME)
         if zone is not None:
             return zone
@@ -181,36 +307,47 @@ class TimezoneHelper:
     @classmethod
     def resolve_timezone(cls, city_or_tz: Optional[str]) -> Tuple[datetime.tzinfo, str, float]:
         """
-        解析城市名称或时区标识为具体的 datetime.tzinfo。
-        返回元组: (tzinfo 对象, 时区名称, UTC 偏移小时数)
+        ??????????????? datetime.tzinfo?
+        ????: (tzinfo ??, ????, UTC ?????)
         """
         bot_tz = cls.get_bot_timezone()
         if not city_or_tz or not isinstance(city_or_tz, str):
             return bot_tz, DEFAULT_BOT_TZ_NAME, DEFAULT_BOT_OFFSET_HOURS
 
         raw = city_or_tz.strip().lower()
+        if not raw:
+            return bot_tz, DEFAULT_BOT_TZ_NAME, DEFAULT_BOT_OFFSET_HOURS
 
-        # 1. 城市名字典匹配
+        # 1. ??????????????????????
+        if raw in CITY_TO_TZ_MAP:
+            tz_name = CITY_TO_TZ_MAP[raw]
+            zone = tz.gettz(tz_name)
+            if zone is not None:
+                now = datetime.datetime.now(zone)
+                offset = (now.utcoffset() or datetime.timedelta(hours=8)).total_seconds() / 3600.0
+                return zone, tz_name, offset
+
         for k, tz_name in CITY_TO_TZ_MAP.items():
-            if k.lower() in raw or raw in k.lower():
+            k_low = k.lower()
+            if len(k_low) >= 2 and (k_low in raw or raw in k_low):
                 zone = tz.gettz(tz_name)
                 if zone is not None:
                     now = datetime.datetime.now(zone)
                     offset = (now.utcoffset() or datetime.timedelta(hours=8)).total_seconds() / 3600.0
                     return zone, tz_name, offset
 
-        # 2. 中文时区表达（例如“东八区”、“西五区”、“东9区”）
-        m_cn = re.search(r"([东西])([0-9零一二三四五六七八九十]+)区?", raw)
+        # 2. ???????????????????????9???
+        m_cn = re.search(r"([??])([0-9???????????]+)??", raw)
         if m_cn:
             direction, num_str = m_cn.groups()
             num = int(num_str) if num_str.isdigit() else CHINESE_ZONE_MAP.get(num_str, 8)
-            offset = num if direction == "东" else -num
+            offset = num if direction == "?" else -num
             zone = datetime.timezone(datetime.timedelta(hours=offset))
             sign = "+" if offset >= 0 else ""
             return zone, f"UTC{sign}{int(offset)}", float(offset)
 
-        # 3. 常见 UTC / GMT 偏移字符串（如 UTC+8, UTC+03:00, GMT-5, +8, -3）
-        m_utc = re.search(r"(?:utc|gmt)?\s*([+-]\d{1,2})(?::?(\d{2}))?", raw)
+        # 3. ?? UTC / GMT ??????? UTC+8, UTC+03:00, GMT-5, +8, -3?
+        m_utc = re.search(r"^(?:utc|gmt)?\s*([+-]\d{1,2})(?::?(\d{2}))?$", raw)
         if m_utc:
             hours = int(m_utc.group(1))
             mins = int(m_utc.group(2)) if m_utc.group(2) else 0
@@ -219,14 +356,32 @@ class TimezoneHelper:
             sign = "+" if hours >= 0 else ""
             return zone, f"UTC{sign}{hours}:{mins:02d}" if mins else f"UTC{sign}{hours}", total_offset
 
-        # 4. 直接尝试 tz.gettz 解析（如 "Europe/Moscow", "America/New_York"）
+        # 4. ???? tz.gettz ???? "Europe/Moscow", "America/New_York"?
         direct_zone = tz.gettz(city_or_tz.strip())
         if direct_zone is not None:
             now = datetime.datetime.now(direct_zone)
             offset = (now.utcoffset() or datetime.timedelta(hours=8)).total_seconds() / 3600.0
             return direct_zone, city_or_tz.strip(), offset
 
-        # 兜底返回 Bot 默认时区
+        # 5. ????????????
+        cached_tz_name = cls._get_cached_tz(raw)
+        if cached_tz_name:
+            cached_zone = tz.gettz(cached_tz_name)
+            if cached_zone is not None:
+                now = datetime.datetime.now(cached_zone)
+                offset = (now.utcoffset() or datetime.timedelta(hours=8)).total_seconds() / 3600.0
+                return cached_zone, cached_tz_name, offset
+
+        # 6. ????????????????????/???? Castro Valley ???????
+        remote_tz_name = cls._query_remote_geocoding_tz(city_or_tz.strip())
+        if remote_tz_name:
+            remote_zone = tz.gettz(remote_tz_name)
+            if remote_zone is not None:
+                now = datetime.datetime.now(remote_zone)
+                offset = (now.utcoffset() or datetime.timedelta(hours=8)).total_seconds() / 3600.0
+                return remote_zone, remote_tz_name, offset
+
+        # ???? Bot ????
         return bot_tz, DEFAULT_BOT_TZ_NAME, DEFAULT_BOT_OFFSET_HOURS
 
     @classmethod
@@ -235,7 +390,7 @@ class TimezoneHelper:
         city_or_tz: Optional[str],
         base_time: Optional[datetime.datetime] = None,
     ) -> datetime.datetime:
-        """获取用户当地时间（若 base_time 为空则取当前时刻）"""
+        """?????????? base_time ?????????"""
         zone, _, _ = cls.resolve_timezone(city_or_tz)
         if base_time is None:
             return datetime.datetime.now(zone)
@@ -253,8 +408,8 @@ class TimezoneHelper:
         now_dt: Optional[datetime.datetime] = None,
     ) -> bool:
         """
-        判断用户当地时间是否正处于 target_hour:target_minute 附近。
-        tolerance_minutes: 允许的时间误差范围（分钟）
+        ????????????? target_hour:target_minute ???
+        tolerance_minutes: ?????????????
         """
         user_now = cls.get_user_local_time(city_or_tz, base_time=now_dt)
         current_minute_of_day = user_now.hour * 60 + user_now.minute
@@ -271,8 +426,8 @@ class TimezoneHelper:
         from_bot_dt: Optional[datetime.datetime] = None,
     ) -> datetime.datetime:
         """
-        计算目标城市当地时间到达 target_hour:target_minute 时，对应的 Bot 时区（datetime 对象）。
-        weekdays: 指定星期几（0=周一, 6=周日），若为 None 则表示每天。
+        ???????????? target_hour:target_minute ????? Bot ???datetime ????
+        weekdays: ??????0=??, 6=?????? None ??????
         """
         bot_tz = cls.get_bot_timezone()
         user_tz, _, _ = cls.resolve_timezone(city_or_tz)
@@ -284,7 +439,7 @@ class TimezoneHelper:
 
         user_now = from_bot_dt.astimezone(user_tz)
 
-        # 向上搜寻接下来 14 天中最快满足条件的时间
+        # ??????? 14 ???????????
         for day_offset in range(14):
             candidate_date = (user_now + datetime.timedelta(days=day_offset)).date()
             if weekdays is not None and candidate_date.weekday() not in weekdays:
@@ -300,11 +455,11 @@ class TimezoneHelper:
                 tzinfo=user_tz,
             )
 
-            # 必须严格在当前时间之后
+            # ???????????
             if candidate_user_dt > user_now:
                 return candidate_user_dt.astimezone(bot_tz)
 
-        # 兜底返回明天
+        # ??????
         fallback = user_now + datetime.timedelta(days=1)
         fallback_dt = datetime.datetime(
             fallback.year, fallback.month, fallback.day,
