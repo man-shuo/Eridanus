@@ -11,14 +11,14 @@ schedule_tool.py
 """
 
 import json
-import logging
+from developTools.utils.logger import get_logger
 import datetime
 from typing import Optional, Union, Dict, Any, List
 
 from framework_common.database_util.User import get_user
 from framework_common.schedule_service import get_scheduler, TimezoneHelper
 
-logger = logging.getLogger("ScheduleService.Tool")
+logger = get_logger("ScheduleTool")
 
 
 async def call_create_schedule_task(

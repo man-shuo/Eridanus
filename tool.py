@@ -598,16 +598,83 @@ def execute_smart_update(source_idx: int = 0, non_interactive: bool = False) -> 
 
 def restart_bot_process():
     logger.info("准备重启 Bot 进程以使新代码生效...")
-    bat_path = os.path.abspath("启动脚本.bat")
-    try:
-        if os.path.exists(bat_path):
-            subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=subprocess.CREATE_NEW_CONSOLE)
-        else:
-            subprocess.Popen([sys.executable, "main.py"], creationflags=subprocess.CREATE_NEW_CONSOLE)
-    except Exception as e:
-        logger.error(f"拉起新 Bot 进程异常: {e}")
+    workspace_dir = os.path.dirname(os.path.abspath(__file__))
+    target_bat = os.path.join(workspace_dir, "启动脚本.bat")
+    cur_pid = os.getpid()
+    pids_to_kill = []
 
-    time.sleep(1.5)
+    try:
+        import psutil
+        cur_proc = psutil.Process(cur_pid)
+        for child in cur_proc.children(recursive=True):
+            if child.pid not in pids_to_kill:
+                pids_to_kill.append(child.pid)
+        pids_to_kill.append(cur_pid)
+
+        for ancestor in cur_proc.parents():
+            anc_name = (ancestor.name() or "").lower()
+            if anc_name in ("python.exe", "pythonw.exe", "py.exe"):
+                if ancestor.pid not in pids_to_kill:
+                    pids_to_kill.append(ancestor.pid)
+                continue
+            if anc_name in ("cmd.exe", "powershell.exe", "pwsh.exe"):
+                try:
+                    cmdline_str = " ".join(ancestor.cmdline())
+                    if "启动脚本2" in cmdline_str:
+                        alt_bat = os.path.join(workspace_dir, "启动脚本2(循环重启).bat")
+                        if os.path.exists(alt_bat):
+                            target_bat = alt_bat
+                except Exception:
+                    pass
+                if ancestor.pid not in pids_to_kill:
+                    pids_to_kill.append(ancestor.pid)
+            break
+    except Exception as e:
+        logger.warning(f"收集进程树信息时出现异常: {e}")
+        if cur_pid not in pids_to_kill:
+            pids_to_kill.append(cur_pid)
+        ppid = os.getppid()
+        if ppid and ppid not in pids_to_kill:
+            pids_to_kill.append(ppid)
+
+    restarter_code = (
+        "import sys, os, time, subprocess, socket\n"
+        "workspace_dir = sys.argv[1]\n"
+        "target_bat = sys.argv[2]\n"
+        "pids_to_kill = [int(p) for p in sys.argv[3:] if p.isdigit()]\n"
+        "time.sleep(0.8)\n"
+        "for pid in pids_to_kill:\n"
+        "    try:\n"
+        "        subprocess.run(['taskkill', '/F', '/PID', str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "for _ in range(25):\n"
+        "    try:\n"
+        "        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:\n"
+        "            s.settimeout(0.3)\n"
+        "            if s.connect_ex(('127.0.0.1', 5007)) != 0:\n"
+        "                break\n"
+        "    except Exception:\n"
+        "        break\n"
+        "    time.sleep(0.4)\n"
+        "CREATE_NEW_CONSOLE = 0x00000010\n"
+        "if os.path.exists(target_bat):\n"
+        "    subprocess.Popen(['cmd.exe', '/c', target_bat], cwd=workspace_dir, creationflags=CREATE_NEW_CONSOLE, close_fds=True)\n"
+        "else:\n"
+        "    subprocess.Popen([sys.executable, 'main.py'], cwd=workspace_dir, creationflags=CREATE_NEW_CONSOLE, close_fds=True)\n"
+    )
+
+    try:
+        CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        flags = CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        cmd = [sys.executable, "-c", restarter_code, workspace_dir, target_bat] + [str(p) for p in pids_to_kill]
+        subprocess.Popen(cmd, cwd=workspace_dir, creationflags=flags, close_fds=True)
+    except Exception as e:
+        logger.error(f"拉起独立重启守护进程异常: {e}")
+
+    time.sleep(0.3)
     os._exit(0)
 
 

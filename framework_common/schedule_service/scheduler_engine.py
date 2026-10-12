@@ -16,7 +16,7 @@ import datetime
 import importlib
 import inspect
 import json
-import logging
+from developTools.utils.logger import get_logger
 import os
 import re
 import time
@@ -30,7 +30,7 @@ from developTools.message.message_components import Text
 from framework_common.framework_util.any_event import AnyEvent
 from framework_common.schedule_service.timezone_helper import TimezoneHelper
 
-logger = logging.getLogger("ScheduleService.Engine")
+logger = get_logger("DynamicScheduler")
 
 DB_DIR = "data/dataBase"
 DB_PATH = os.path.join(DB_DIR, "dynamic_schedules.db")

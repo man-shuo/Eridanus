@@ -171,8 +171,14 @@ def setup_event_handlers():
     async def handle_private_message(event: PrivateMessageEvent):
         await handler(bot1, event)
 
+    _welcome_message_sent = False
+
     @bot1.on(LifecycleMetaEvent)
     async def handle_lifecycle(event: LifecycleMetaEvent):
+        nonlocal _welcome_message_sent
+        if getattr(event, "from_secondary", False) or _welcome_message_sent:
+            return
+        _welcome_message_sent = True
         from asyncio import sleep
         await sleep(2)
         await bot1.send_friend_message(

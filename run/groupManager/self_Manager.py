@@ -309,8 +309,15 @@ def main(bot:ExtendBot, config):
     global send_next_message
     send_next_message = False
 
+    _self_manager_lifecycle_started = False
+
     @bot.on(LifecycleMetaEvent)
     async def _(event):
+        nonlocal _self_manager_lifecycle_started
+        if getattr(event, "from_secondary", False) or _self_manager_lifecycle_started:
+            return
+        _self_manager_lifecycle_started = True
+
         async def send_heartbeat():
             group_list = await bot.get_group_list()
             group_list = group_list["data"]

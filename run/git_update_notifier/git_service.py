@@ -1,12 +1,12 @@
 import asyncio
 import json
-import logging
+from developTools.utils.logger import get_logger
 import os
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
-logger = logging.getLogger("GitUpdateNotifier.Service")
+logger = get_logger("GitUpdateNotifier")
 
 
 class GitService:

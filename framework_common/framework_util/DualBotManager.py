@@ -1,4 +1,4 @@
-﻿# dual_bot_manager.py
+# dual_bot_manager.py
 import asyncio
 from typing import Union, Optional, Set
 from developTools.adapters.websocket_adapter import WebSocketBot
@@ -67,13 +67,15 @@ class DualBotManager:
                     elif "post_type" in data:
                         event_obj = EventFactory.create_event(data)
 
-                        # 设置副Bot的ID
-                        try:
-                            if event_obj.post_type == "meta_event" and event_obj.meta_event_type == "lifecycle":
-                                self.secondary_bot.id = int(event_obj.self_id)
-                                self.secondary_bot.logger.info(f"副Bot ID: {self.secondary_bot.id}")
-                        except:
-                            pass
+                        # 副Bot的生命周期与心跳事件仅用于维护副Bot状态，不转发到主Bot事件总线，避免重复触发启动事件
+                        if event_obj and event_obj.post_type == "meta_event":
+                            try:
+                                if event_obj.meta_event_type == "lifecycle":
+                                    self.secondary_bot.id = int(event_obj.self_id)
+                                    self.secondary_bot.logger.info(f"副Bot ID: {self.secondary_bot.id}")
+                            except Exception:
+                                pass
+                            continue
 
                         if event_obj:
                             # 标记事件来自副Bot：所有事件最终都在主Bot的事件总线上处理，
@@ -129,7 +131,6 @@ class DualBotManager:
         async def routed_send(event: EventBase, components: list[Union[MessageComponent, str]], Quote: bool = False):
             """路由发送方法：根据群号决定使用哪个Bot发送"""
             # 检查是否为目标群号（支持集合判断）
-            # ??????????????????879886836?webui?222222?android?11111???telegram???/???
             # 根据 adapter_source 或 group_id 判断是否通过副Bot (接入Hub的 Telegram/WebUI/Android) 发送
             is_virtual_group = False
             src = getattr(event, "adapter_source", None)

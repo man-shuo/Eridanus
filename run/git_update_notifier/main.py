@@ -1,5 +1,5 @@
 import asyncio
-import logging
+from developTools.utils.logger import get_logger
 from typing import Optional, Dict, Any
 
 from developTools.event.events import GroupMessageEvent, PrivateMessageEvent, LifecycleMetaEvent
@@ -8,7 +8,7 @@ from framework_common.framework_util.any_event import AnyEvent
 from framework_common.framework_util.websocket_fix import ExtendBot
 from run.git_update_notifier.git_service import GitService
 
-logger = logging.getLogger("GitUpdateNotifier")
+logger = get_logger("GitUpdateNotifier")
 
 _bg_task: Optional[asyncio.Task] = None
 _loop_started = False
