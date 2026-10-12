@@ -68,6 +68,9 @@ class MessageChain(list):
                 # 字符串 -> 转换成 Text 组件
                 parsed_messages.append(Text(msg))
             elif isinstance(msg, dict):
+                # 忽略前端附带的非消息段元数据（如 {'msg_id': ...}）
+                if "type" not in msg and "msg_id" in msg:
+                    continue
                 # 字典 -> 解析成对应的组件
                 msg_type = msg.get("type")
                 msg_data = msg.get("data", {})

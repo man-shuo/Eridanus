@@ -65,6 +65,11 @@ class DualBotManager:
                             future.set_result(data)
                     # 处理事件消息
                     elif "post_type" in data:
+                        if isinstance(data.get("message"), list):
+                            data["message"] = [
+                                seg for seg in data["message"]
+                                if not (isinstance(seg, dict) and "type" not in seg and "msg_id" in seg)
+                            ]
                         event_obj = EventFactory.create_event(data)
 
                         # 副Bot的生命周期与心跳事件仅用于维护副Bot状态，不转发到主Bot事件总线，避免重复触发启动事件

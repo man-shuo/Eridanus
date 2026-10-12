@@ -56,10 +56,15 @@ def unescape_cq_value(text: str) -> str:
     return html.unescape(text)
 def parse_message_2processed_message(message: dict) -> List[Dict[str, Union[str, Dict]]]:
     result = []
+    if not isinstance(message, list):
+        return result
     for item in message:
+        if not isinstance(item, dict) or "type" not in item:
+            continue
         type = item["type"]
+        data = item.get("data", {})
         if type == "text":
-            result.append({"text": item["data"]["text"]})
+            result.append({"text": data.get("text", "") if isinstance(data, dict) else str(data)})
         else:
-            result.append({type: item["data"]})
+            result.append({type: data})
     return result

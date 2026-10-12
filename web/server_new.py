@@ -1634,6 +1634,9 @@ def handle_websocket(ws):
             elif isinstance(message, list):
                 is_update = True
                 message_id = time_now
+                if message and isinstance(message[0], dict) and "msg_id" in message[0] and "type" not in message[0]:
+                    message_id = message[0]["msg_id"]
+                    del message[0]
                 role = 'end'
                 try:
                     asyncio.run(

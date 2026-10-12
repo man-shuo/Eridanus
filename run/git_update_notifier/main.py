@@ -91,7 +91,9 @@ async def report_update_via_mai_reply(bot: ExtendBot, config, master_id: int, up
             f"1. 兴奋或关切地告知 Master 仓库有了最新更新（领先了 {update_info['ahead_count']} 个提交）；\n"
             f"2. 详细梳理并说明这些提交都干了什么（重点说明新增了什么功能、优化或修复了哪些问题，让管理员一目了然）；\n"
             f"   - 如果包含多个 commit，请条理清晰地列出主要更新内容；\n"
-            f"3. 贴心提醒管理员直接运行根目录下的【更新脚本.bat】就可以一键完成更新，不需要任何复杂的代码或 git 命令操作。"
+            f"3. 贴心提醒管理员：现在只需要直接在聊天中对你下达更新命令（例如直接对你说“更新系统”或“帮我更新代码”），"
+            f"你就会自动完成代码拉取、冲突处理与自动重启；当然也可以运行根目录下的【更新脚本.bat】进行更新。"
+            f"（注意：本次仅为检测汇报通知，请只发送汇报文字，不要在本次汇报中直接调用 update_system 工具）。"
         )
 
         logger.info(f"[GitNotifier] 正在调用 mai_reply 向管理员 master ({master_id}) 生成更新播报 (包含 {update_info['ahead_count']} 个提交)...")
@@ -109,7 +111,7 @@ async def report_update_fallback(bot: ExtendBot, config, master_id: int, update_
         f"检测到远程仓库 [{update_info['branch']}] 分支有 {update_info['ahead_count']} 个新提交！\n\n"
         f"【更新提交详情】\n{update_info['commit_details']}\n\n"
         f"【修改文件统计】\n{update_info['diff_stat']}\n\n"
-        f"💡 提醒：你可以直接运行根目录下的【更新脚本.bat】进行一键更新~"
+        f"💡 提醒：你可以直接在聊天中对我下达更新命令（如对我说「更新系统」）让我自动更新并重启，或者运行根目录下的【更新脚本.bat】进行一键更新~"
     )
     await send_to_master(bot, master_id, structured_msg)
 
@@ -261,7 +263,7 @@ def main(bot: ExtendBot, config):
             else:
                 await bot.send(
                     event,
-                    [Text(f"✨ 发现远程分支 {update_info['branch']} 领先 {update_info['ahead_count']} 个提交！已开始生成详细更新汇报通知 Master...")]
+                    [Text(f"✨ 发现远程分支 {update_info['branch']} 领先 {update_info['ahead_count']} 个提交！已开始生成详细更新汇报通知 Master（您也可以直接对我下达「更新系统」指令让我自动完成更新）...")]
                 )
 
         except Exception as e:
