@@ -563,10 +563,70 @@ def main(bot: ExtendBot, config: YAMLManager):
             if check_resp_for_expired(res):
                 await handle_cookie_expired(f"发布动态失败，登录凭证失效({str(res)[:60]})")
         return res
+    def strip_hat_tags(tags_str: str) -> str:
+        """彻底剥离提示词中的所有帽子相关 tags（包括带括号权重的修饰，如 chocolate brown beret、beanie 等）"""
+        if not tags_str:
+            return ""
+        parts = [p.strip() for p in tags_str.split(",") if p.strip()]
+        hat_pattern = re.compile(
+            r"(?:(?:beret|beanie|sunhat|bonnet|headwear)|(?:straw|bucket|baseball|knit|wool|winter|sun|felt|cowboy)\s+(?:hat|cap)|\bhat\b|\bcap\b)",
+            re.IGNORECASE
+        )
+        filtered = []
+        for part in parts:
+            clean_part = re.sub(r"[():0-9.]", "", part).strip()
+            if hat_pattern.search(clean_part):
+                continue
+            filtered.append(part)
+        return ", ".join(filtered)
+
+    def is_no_hat_scene(post_text: str = "", theme_desc: str = "", dynamic_tags: str = "", category: str = "") -> bool:
+        """
+        智能判断当前场景是否属于【根本不需要戴帽子】的生活切面（如穿睡衣、睡眠、床上、泡澡、室内放松等）
+        """
+        if category and category.lower() in ["sleepwear", "loungewear"]:
+            return True
+
+        combined_text = f"{post_text} {theme_desc} {dynamic_tags}".lower()
+
+        # 睡衣 / 睡眠 / 赖床 / 床上
+        sleep_kw = [
+            "睡衣", "睡裤", "睡袍", "睡裙", "被窝", "钻被窝", "枕头", "床沿", "床上", "躺在床上", "躺床上",
+            "打哈欠", "做梦", "困倦", "困了", "晚安", "睡觉", "入睡", "睡前", "睡眼", "刚醒", "醒来",
+            "赖床", "伸懒腰", "揉眼睛", "pajama", "pajamas", "sleepwear", "nightdress", "bathrobe",
+            "in bed", "on bed", "lying on bed", "sitting on bed", "bed edge", "pillow", "duvet",
+            "blanket", "sleepy", "sleeping", "bedtime", "yawn", "waking up", "wake up", "bedhead", "bare legs"
+        ]
+        if any(k in combined_text for k in sleep_kw):
+            return True
+
+        # 沐浴 / 洗漱 / 护肤 / 吹头发
+        bath_kw = [
+            "洗澡", "泡澡", "沐浴", "浴缸", "花洒", "吹头发", "吹风机", "擦头发", "洗脸", "敷面膜",
+            "护肤", "面霜", "梳妆台", "浴室", "bath", "bubble bath", "bathtub", "shower",
+            "washing face", "face cream", "drying hair", "damp hair", "towel", "skincare",
+            "vanity mirror", "bathroom"
+        ]
+        if any(k in combined_text for k in bath_kw):
+            return True
+
+        # 室内温馨日常（且非户外）
+        outdoor_kw = ["outdoor", "street", "park", "sidewalk", "beach", "mountain", "outside", "外出", "逛街", "路边", "公园", "街景", "海边"]
+        is_outdoor = any(k in combined_text for k in outdoor_kw)
+        if not is_outdoor:
+            indoor_kw = [
+                "室内", "房间", "卧室", "客厅", "书房", "窝在沙发", "沙发上", "地毯上", "打游戏",
+                "bedroom", "indoor", "living room", "cozy room", "sitting on sofa", "couch", "sitting cross-legged"
+            ]
+            if any(k in indoor_kw for k in combined_text):
+                return True
+
+        return False
+
     # ---------------------------------------------------------
     # Stable Diffusion 绘画服务端调用 (针对 SDXL 模型调优)
     # ---------------------------------------------------------
-    async def call_sd_generate(prompt: str) -> Optional[str]:
+    async def call_sd_generate(prompt: str, extra_negative: str = "") -> Optional[str]:
         sd_cfg = config.qq_zone.config.get("sd绘画设置", {})
         base_url = sd_cfg.get("sdUrl", "http://api.apollodorus.xyz")
         if not base_url:
@@ -581,10 +641,19 @@ def main(bot: ExtendBot, config: YAMLManager):
         sampler_name = sd_cfg.get("sampler_name", "Euler a")
         scheduler = sd_cfg.get("scheduler", "Automatic")
         rules = get_chara_drawing_rules()
-        negative_prompt = rules.get("negative") or (
+        base_negative = rules.get("negative") or (
             "jpeg artifacts, very displeasing, chromatic aberration, logo, dated, signature, "
             "multiple views, gigantic breasts, nsfw"
         )
+        negative_parts = [base_negative]
+        if extra_negative:
+            negative_parts.append(extra_negative)
+
+        # 针对免帽场景（如睡衣/床上/沐浴/室内放松等），在负面提示词中强力压制帽子，杜绝模型画出帽子
+        if is_no_hat_scene(dynamic_tags=prompt):
+            negative_parts.append("(hat, cap, beret, beanie, headwear, hair covering:1.2)")
+
+        negative_prompt = ", ".join([p.strip(", ") for p in negative_parts if p and p.strip(", ")])
 
         payload = {
             "prompt": prompt,
@@ -795,7 +864,7 @@ def main(bot: ExtendBot, config: YAMLManager):
         full_section = (
             f"基础形象: {base_prompt}\n"
             f"画风模型: {art_prompt}\n"
-            f"默认服装: {outfit_prompt}"
+            f"默认服装参考: {outfit_prompt}（注：仅作为外出标准装束参考，非固定常驻饰品；室内/睡衣场景不戴帽子）"
         )
 
         return {
@@ -819,12 +888,17 @@ def main(bot: ExtendBot, config: YAMLManager):
         default_outfit = rules.get("outfit", "")
         full_rules_text = rules.get("full_section", "")
 
+        # 结合动态文案与主题提示判断是否属于免帽场景（如睡衣/床上/沐浴/室内放松等）
+        no_hat = is_no_hat_scene(post_text=post_text, theme_desc=theme_desc)
+
         # 随机抽取一套结构化全色谱穿搭数据（全色谱配色种子 + 服饰款式模板 + 70% 概率细节配件变体）
         outfit_data = None
         get_outfit_data_fn = getattr(qzone_themes, "get_random_outfit_data", None)
         if callable(get_outfit_data_fn):
             try:
-                outfit_data = get_outfit_data_fn()
+                # 传入文案与主题 hint，确保种子抽取时若为室内/睡衣则绝对不分配帽子饰品
+                combined_hint = f"{post_text} {theme_desc}"
+                outfit_data = get_outfit_data_fn(combined_hint)
             except Exception as e:
                 logger.warning(f"[Qzone SD] 获取穿搭数据异常: {e}")
 
@@ -834,6 +908,9 @@ def main(bot: ExtendBot, config: YAMLManager):
             secondary_color = outfit_data.get("secondary_color", "white")
             outfit_tags = outfit_data.get("outfit_tags", "")
             outfit_detail = outfit_data.get("detail", "")
+            category = outfit_data.get("category", "")
+            if not no_hat and category in ["sleepwear", "loungewear"]:
+                no_hat = True
         else:
             palette_name = "焦糖驼色配米白"
             primary_color = "caramel camel brown"
@@ -841,11 +918,31 @@ def main(bot: ExtendBot, config: YAMLManager):
             outfit_tags = "caramel camel brown slouchy chunky knit cardigan, warm off-white ribbed camisole, cozy shorts"
             outfit_detail = ""
 
+        # 如果判定为免帽场景，先清洗种子里的 outfit_tags 和 outfit_detail
+        if no_hat:
+            outfit_tags = strip_hat_tags(outfit_tags)
+            outfit_detail = strip_hat_tags(outfit_detail)
+
         dynamic_scene_tags = ""
         try:
             if mai_llm:
                 season_meta = get_current_season()
                 season_sd_full = season_meta.get("full_name", "")
+                
+                # 免帽场景严格提示词约束
+                hat_constraint = ""
+                if no_hat:
+                    hat_constraint = (
+                        "【特别强制注意（生活常识与免帽要求）】：\n"
+                        "当前为睡衣/床上/睡眠/沐浴/室内放松等生活切面，生活常识中绝对不戴帽子！\n"
+                        "严禁输出任何帽子相关的 tag（绝对禁止 beret, beanie, hat, cap, headwear, hair covering 等），"
+                        "发型保持自然（可为 loose hair, bedhead, hair ribbon 或普通日常发型）。\n"
+                    )
+                else:
+                    hat_constraint = (
+                        "【生活常识注意】：除非文案特别强调帽子，否则日常不要强制戴帽子（杜绝千篇一律画帽子，绝大多数日常情境均不戴帽子）。\n"
+                    )
+
                 prompt_generator = (
                     f"你是一名专业动漫 Stable Diffusion 提示词专家。角色是：{bot_name}。\n"
                     f"根据角色动态文案，仅提取【当前情绪与表情】+【当前动作/场景/日常服饰穿搭】的纯英文 tags。\n"
@@ -863,13 +960,14 @@ def main(bot: ExtendBot, config: YAMLManager):
                     f"3. 【重点严禁】：绝对严禁千篇一律偏向薄荷绿（mint green / pastel green / light green 等单一刻板偏见）！本次服饰主色必须明确使用指定的【{primary_color}】（如：{primary_color} 卫衣/毛衣/大衣/睡衣/衬衫等），展现全色谱多样性！\n"
                     f"4. 可根据动态文案微调款式细节（如睡前可使用 {primary_color} 睡衣/家居服，外出/晨起使用相应外套/风衣），但服装主色必须忠实保持为 {primary_color}。\n"
                     f"5. 服饰厚度、冷暖层次与环境细节大体契合时令即可，杜绝反季节违和常识（如寒冬穿单薄夏装短裤、盛夏裹羽绒服烤火）。\n"
-                    f"6. 【画面要素与背景严禁单一刻板】：切忌因为时令而在每个画面都硬塞入枯燥重复的季节符号（例如：绝对不要千篇一律全是枫叶 maple leaf、落叶 fallen leaves、枯叶或红叶，已造成严重审美疲劳）！画面背景、道具与生活情境应保持丰富多样、松弛自然（如温馨房间、书桌、窗台、咖啡店、日常街景、便利店、走廊等各类日常切面均可），不要强行添加枫叶等刻板季节要素。\n"
-                    f"7. 仅输出情绪状态、服饰穿搭（含指定颜色与款式）、动作和场景，不要解释，不要输出任何中文。\n"
-                    f"8. 仅输出纯英文 tags，用英文逗号分隔。"
+                    f"6. {hat_constraint}"
+                    f"7. 【画面要素与背景严禁单一刻板】：切忌因为时令而在每个画面都硬塞入枯燥重复的季节符号（例如：绝对不要千篇一律全是枫叶 maple leaf、落叶 fallen leaves、枯叶或红叶，已造成严重审美疲劳）！画面背景、道具与生活情境应保持丰富多样、松弛自然（如温馨房间、书桌、窗台、咖啡店、日常街景、便利店、走廊等各类日常切面均可），不要强行添加枫叶等刻板季节要素。\n"
+                    f"8. 仅输出情绪状态、服饰穿搭（含指定颜色与款式）、动作和场景，不要解释，不要输出任何中文。\n"
+                    f"9. 仅输出纯英文 tags，用英文逗号分隔。"
                 )
                 sd_tags = await mai_llm.chat(
                     messages=[{"role": "user", "content": prompt_generator}],
-                    system_prompt="You are an expert prompt engineer specializing in anime Stable Diffusion tags with diverse clothing styles and rich full-spectrum color palettes.",
+                    system_prompt="You are an expert prompt engineer specializing in anime Stable Diffusion tags with diverse clothing styles, rich full-spectrum color palettes, and natural everyday logic without forced headwear.",
                 )
                 if sd_tags:
                     cleaned_tags = sd_tags.strip().replace("\n", ", ")
@@ -882,24 +980,28 @@ def main(bot: ExtendBot, config: YAMLManager):
             dynamic_scene_tags = theme_desc
 
         # 色彩纠偏与防薄荷绿复现机制：
-        # 若本次种子分配的并非绿色系（主色与辅色均不含 green），但 LLM 依然机械输出 mint green / pastel green 等刻板色彩，
-        # 则进行后置正则替换纠偏，强制替换为当前种子分配的真实主色。
         is_green_palette = ("green" in primary_color.lower()) or ("green" in secondary_color.lower())
         if not is_green_palette and dynamic_scene_tags:
-            # 替换 mint green, pastel green, light green, pale green 等
             dynamic_scene_tags = re.sub(
                 r"\b(?:mint|pastel|light|pale)\s+green\b",
                 primary_color,
                 dynamic_scene_tags,
                 flags=re.IGNORECASE
             )
-            # 替换单独修饰服装的 mint (例如 mint hoodie, mint sweater, mint pajamas)
             dynamic_scene_tags = re.sub(
                 r"\bmint\s+(sweater|hoodie|cardigan|coat|dress|skirt|pajamas|sleepwear|shirt|jacket|top|pants|t-shirt|tee|camisole)\b",
                 rf"{primary_color} \1",
                 dynamic_scene_tags,
                 flags=re.IGNORECASE
             )
+
+        # 结合 LLM 生成的 tags 再次全面校验是否为免帽场景
+        if not no_hat and is_no_hat_scene(post_text=post_text, theme_desc=theme_desc, dynamic_tags=dynamic_scene_tags):
+            no_hat = True
+
+        # 若命中免帽场景，彻底剥离 dynamic_scene_tags 中的任何帽子标签
+        if no_hat and dynamic_scene_tags:
+            dynamic_scene_tags = strip_hat_tags(dynamic_scene_tags)
 
         prompt_elements = []
         # 注入高质量与美学通用标签
@@ -920,10 +1022,11 @@ def main(bot: ExtendBot, config: YAMLManager):
         has_custom_clothing = any(ck in dynamic_scene_tags.lower() for ck in cloth_keywords)
 
         if not has_custom_clothing:
-            if outfit_tags:
-                prompt_elements.append(outfit_tags)
-            elif default_outfit:
-                prompt_elements.append(default_outfit)
+            outfit_to_use = outfit_tags or default_outfit
+            if no_hat and outfit_to_use:
+                outfit_to_use = strip_hat_tags(outfit_to_use)
+            if outfit_to_use:
+                prompt_elements.append(outfit_to_use)
         else:
             # 若 LLM 生成了衣服但未体现指定的主色或辅色，补充主色强调标签，防止色彩漂移
             has_palette_color = (
@@ -933,9 +1036,10 @@ def main(bot: ExtendBot, config: YAMLManager):
             if not has_palette_color:
                 prompt_elements.append(f"({primary_color} clothing:1.1)")
 
-            # 若本次种子抽取了 70% 概率细节/配件变体，且 LLM tags 中尚未包含，则注入丰富细节
-            if outfit_detail and outfit_detail.lower() not in dynamic_scene_tags.lower():
-                prompt_elements.append(outfit_detail)
+            # 若本次种子抽取了 70% 概率细节/配件变体，且 LLM tags 中尚未包含，则注入丰富细节（免帽场景下已预先清洗）
+            clean_detail = strip_hat_tags(outfit_detail) if no_hat else outfit_detail
+            if clean_detail and clean_detail.lower() not in dynamic_scene_tags.lower():
+                prompt_elements.append(clean_detail)
 
         if dynamic_scene_tags:
             prompt_elements.append(dynamic_scene_tags)
@@ -943,7 +1047,12 @@ def main(bot: ExtendBot, config: YAMLManager):
             prompt_elements.append(art_anchor)
 
         final_prompt = ", ".join([p.strip(", ") for p in prompt_elements if p and p.strip(", ")])
-        logger.info(f"[Qzone SD] 组合完成 SD Prompt: {final_prompt}")
+
+        # 免帽场景终极兜底保障：再次扫描 final_prompt，确保万无一失
+        if no_hat:
+            final_prompt = strip_hat_tags(final_prompt)
+
+        logger.info(f"[Qzone SD] 组合完成 SD Prompt (no_hat={no_hat}): {final_prompt}")
         return final_prompt
 
     # ---------------------------------------------------------

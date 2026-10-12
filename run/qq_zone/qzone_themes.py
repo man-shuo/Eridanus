@@ -4083,53 +4083,100 @@ OUTFIT_STYLE_SEEDS = [
     {"template": "{p} cute babydoll puff-sleeve top, {s} A-line denim skirt with ribbon accents", "category": "alluring"}
 ]
 
-OUTFIT_MUTATION_DETAILS = [
-    "chunky knit scarf around neck",
+# ---------------------------------------------------------------------------
+# 穿搭细节变体与配件库（区分室内/居家/睡衣与外出日常）
+# ---------------------------------------------------------------------------
+OUTFIT_INDOOR_DETAILS = [
+    "soft plush headband",
+    "cozy fluffy fleece socks",
+    "loose velvet hair ribbon",
+    "dainty silver pendant necklace",
+    "rolled-up sleeves, relaxed vibes",
+    "slouchy warm knit socks",
+    "cute hair scrunchie around wrist",
+    "holding ceramic warm mug with two hands",
+]
+
+OUTFIT_GENERAL_DETAILS = [
     "wire-rimmed round glasses",
-    "over-ear headphones around neck",
-    "canvas tote bag on shoulder",
-    "wool beret tilted cute",
     "dainty silver pendant necklace",
     "loose velvet hair ribbon",
     "rolled-up cuffs, casual styling",
-    "slouchy loose socks with retro sneakers",
-    "casual bucket hat",
     "half-tucked shirt hem",
-    "baseball cap worn slightly tilted",
-    "cozy fingerless knit wrist warmers",
     "delicate choker necklace",
+    "slouchy loose socks with retro sneakers",
+    "over-ear headphones around neck",
+    "canvas tote bag on shoulder",
+    "chunky knit scarf around neck",
+    "cozy fingerless knit wrist warmers",
+]
+
+# 仅限户外或街头日常场景可能出现的帽子饰品（超低概率且室内睡衣绝对排除）
+OUTFIT_OUTDOOR_HEADWEAR_DETAILS = [
+    "wool beret tilted cute",
+    "casual bucket hat",
+    "baseball cap worn slightly tilted",
     "beanie hat pulled down casual",
 ]
 
-def get_random_outfit_data() -> dict:
+# 综合通用配件池
+OUTFIT_MUTATION_DETAILS = OUTFIT_GENERAL_DETAILS + OUTFIT_INDOOR_DETAILS
+
+def get_random_outfit_data(scene_hint: str = "") -> dict:
     """
     获取随机全色谱穿搭结构化数据
-    基于 24 套全色谱配色种子、32 款日常款式与 70% 概率触发饰品/细节变体
+    基于 24 套全色谱配色种子、32 款日常款式与 70% 概率触发饰品/细节变体。
+    睡衣 (sleepwear) 与家居 (loungewear) 或室内生活切面绝对不配置任何帽子饰品。
     """
     style = random.choice(OUTFIT_STYLE_SEEDS)
     palette = random.choice(OUTFIT_PALETTE_SEEDS)
 
     outfit = style["template"].format(p=palette["primary"], s=palette["secondary"])
     detail = ""
+    cat = style.get("category", "casual")
+
+    is_indoor_or_sleep = cat in ["sleepwear", "loungewear"]
+    if scene_hint:
+        hint_lower = scene_hint.lower()
+        indoor_kw = [
+            "pajama", "sleep", "bed", "bath", "indoor", "room", "night", "home",
+            "睡衣", "睡裙", "睡袍", "床上", "被窝", "洗澡", "泡澡", "客厅", "卧室",
+            "沙发", "赖床", "晚安", "刚醒", "早安", "做梦", "困倦", "护肤"
+        ]
+        if any(k in hint_lower for k in indoor_kw):
+            is_indoor_or_sleep = True
+
     # 70% 概率随机叠加高质感配件或细节变体，避免穿搭呆板单一
     if random.random() < 0.70:
-        detail = random.choice(OUTFIT_MUTATION_DETAILS)
-        outfit = f"{outfit}, {detail}"
+        if is_indoor_or_sleep:
+            # 睡衣/居家室内场景：仅从居家专属温馨细节中抽取，严禁帽子
+            detail = random.choice(OUTFIT_INDOOR_DETAILS)
+        else:
+            # 外出/通用场景：绝大多数为日常服饰细节，帽子仅作为偶发点缀（约 12% 概率）
+            if random.random() < 0.12:
+                detail = random.choice(OUTFIT_OUTDOOR_HEADWEAR_DETAILS)
+            else:
+                detail = random.choice(OUTFIT_GENERAL_DETAILS)
+
+        if detail:
+            outfit = f"{outfit}, {detail}"
 
     return {
         "palette_name": palette["name"],
         "primary_color": palette["primary"],
         "secondary_color": palette["secondary"],
         "color_tags": palette["tags"],
-        "category": style["category"],
+        "category": cat,
         "outfit_tags": outfit,
         "detail": detail,
     }
 
 
-def get_random_outfit_guidance() -> str:
+def get_random_outfit_guidance(scene_hint: str = "") -> str:
     """
     获取用于提示词生成的随机穿搭引导标签字符串
     返回主色辅色款式模板 + 细节配件标签，打破单一薄荷绿与固定装扮
     """
-    return get_random_outfit_data()["outfit_tags"]
+    return get_random_outfit_data(scene_hint)["outfit_tags"]
+
+

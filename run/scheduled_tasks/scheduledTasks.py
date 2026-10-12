@@ -505,6 +505,9 @@ def main(bot: ExtendBot, config):
     def create_dynamic_jobs():
         for task_name, task_info in scheduledTasks.items():
             if task_info.get('enable'):
+                if task_name in ("早安问候", "晚安问候"):
+                    # 早晚安问候移交至 DynamicScheduler 进行差异化时区管理与动态推送
+                    continue
                 hour, minute = map(int, task_info['time'].split('/'))
                 logger.info_func(f"定时任务已激活：{task_name}，时间：{hour}:{minute}")
                 _scheduler.add_job(
@@ -520,6 +523,14 @@ def main(bot: ExtendBot, config):
             return
         create_dynamic_jobs()
         _scheduler.start()
+        try:
+            from framework_common.schedule_service import get_scheduler
+            dynamic_sched = get_scheduler(bot=bot, config=config)
+            dynamic_sched.start()
+            await dynamic_sched.sync_daily_greetings_from_config()
+            logger.info_func("scheduledTasks: 动态定时任务调度服务与差异化时区同步已启动")
+        except Exception as e:
+            logger.error(f"scheduledTasks: 启动动态定时任务调度引擎失败: {e}")
 
     # ──────────────────────────────────────────────────────────
     # 订阅管理与手动触发
