@@ -232,7 +232,7 @@ async def timeout_checker(bot, event, user_adding_state, user_id, timeout_tasks)
     """10秒超时检查"""
     task_id = id(asyncio.current_task())
     print(f"超时检查任务开始，用户: {user_id}, 任务ID: {task_id}")
-
+    config=YAMLManager.get_instance()
     try:
         # 等待10秒
         slep_time=config.auto_reply.config["词库添加自动超时"]

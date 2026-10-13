@@ -14,8 +14,7 @@ from typing import Optional, Dict, Any
 
 import aiohttp
 import httpx
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from framework_common.schedule_service import DynamicScheduler, get_scheduler
 
 from run.qq_zone.service.native_login import NativeQzoneLogin
 try:
@@ -96,7 +95,7 @@ class QzoneLifecycleManager:
     def __init__(self, bot_loop=None, logger=None):
         self.bot_loop = bot_loop
         self.logger = logger
-        self.scheduler: Optional[AsyncIOScheduler] = None
+        self.scheduler = None
         self.background_tasks: list = []
         self.last_scheduled_execution: dict = {}
         self.stopped = False
@@ -821,32 +820,9 @@ def main(bot: ExtendBot, config: YAMLManager):
             logger.error(f"[Qzone 保活] 探测异常: {e}")
             return False
 
+    # [已重构接入 DynamicScheduler] 原 start_keepalive_monitor 由调度器统一按间隔驱动，此处保留空定义兼容历史调用
     async def start_keepalive_monitor():
-        cookie_cfg = config.qq_zone.config.get("cookie设置", {})
-        if not cookie_cfg.get("保活", True):
-            logger.info("[Qzone 保活] 保活机制未开启")
-            return
-
-        interval = max(600, int(cookie_cfg.get("保活间隔_秒", 1800)))
-        logger.info(f"[Qzone 保活] 启动温和保活监控，轮询间隔: {interval} 秒")
-
-        while not current_instance.stopped:
-            await asyncio.sleep(interval)
-            if current_instance.stopped:
-                break
-            try:
-                alive = await check_cookie_alive()
-                if alive:
-                    logger.info("[Qzone 保活] Cookie 状态有效，空间在线")
-                else:
-                    logger.warning("[Qzone 保活] 检测到 QQ 空间 Cookie 可能已失效！")
-                    await handle_cookie_expired("空间保活探测失效")
-
-                    if cookie_cfg.get("失效时自动重新登陆", False):
-                        logger.warning("[Qzone 保活] 配置开启了自动重新登陆，尝试拉起登录二维码...")
-                        await login_task_wrapper()
-            except Exception as e:
-                logger.error(f"[Qzone 保活] 监控循环异常: {e}")
+        pass
     def get_chara_drawing_rules() -> dict:
         """从 run/qq_zone/config.yaml 读取用户配置的角色绘图规则与外观设定，留空时使用默认形象提示词"""
         default_base = "1girl, teenager, solo, grey hair, gradient hair, multicolored hair, blue hair, light purple-light blue mixed eyes, (Side swept hair:1.6), ahoge, bangs, middle long hair, (round face:1.2)"
@@ -1525,20 +1501,9 @@ def main(bot: ExtendBot, config: YAMLManager):
             logger.error(f"[Qzone Vtuber日常] 发送异常: {e}")
 
 
+    # [已重构接入 DynamicScheduler] 原 start_vtuber_daily_monitor 由调度器统一按间隔驱动，此处保留空定义兼容历史调用
     async def start_vtuber_daily_monitor():
-        vcfg = config.qq_zone.config.get("vtuber日常互动", {})
-        if not vcfg.get("enable", True):
-            return
-        interval_min = max(10, int(vcfg.get("巡检间隔_分钟", 60)))
-        logger.info(f"[Qzone Vtuber日常] 启动日常巡检监控，轮询间隔: {interval_min} 分钟")
-        while not current_instance.stopped:
-            await asyncio.sleep(interval_min * 60)
-            if current_instance.stopped:
-                break
-            try:
-                await vtuber_daily_task()
-            except Exception as e:
-                logger.error(f"[Qzone Vtuber日常] 巡检异常: {e}")
+        pass
     # ---------------------------------------------------------
     # 空间好友评论自动拟人化互动回复
     # ---------------------------------------------------------
@@ -2047,43 +2012,54 @@ def main(bot: ExtendBot, config: YAMLManager):
 
                 await asyncio.sleep(2)
 
+    # [已重构接入 DynamicScheduler] 原 start_comment_monitor 由调度器统一按间隔驱动，此处保留空定义兼容历史调用
     async def start_comment_monitor():
-        inter_cfg = config.qq_zone.config.get("动态互动", {})
-        if not inter_cfg.get("enable_comment_reply", True):
-            return
-
-        interval = max(60, int(inter_cfg.get("check_interval_秒", 180)))
-        logger.info(f"[Qzone 评论互动] 启动评论监控，轮询间隔: {interval} 秒")
-        while not current_instance.stopped:
-            await asyncio.sleep(interval)
-            if current_instance.stopped:
-                break
-            try:
-                await check_and_reply_comments()
-            except Exception as e:
-                logger.error(f"[Qzone 评论巡检] 异常: {e}")
+        pass
 
     # ---------------------------------------------------------
-    # 定时调度器
+    # 动态定时任务调度器与工具注册 (DynamicScheduler)
     # ---------------------------------------------------------
     scheduledTasks = config.qq_zone.config.get("定时发空间", {})
-    scheduler = AsyncIOScheduler()
-    current_instance.scheduler = scheduler
 
-    def create_dynamic_jobs():
-        for task_name, task_info in scheduledTasks.items():
-            if task_info.get("enable"):
-                time_str = str(task_info.get("time", "8/30"))
-                parts = time_str.split("/")
-                if len(parts) == 2:
-                    hour, minute = int(parts[0]), int(parts[1])
-                    logger.info(f"[Qzone 任务] 定时空间任务已注册: {task_name} -> 每天 {hour:02d}:{minute:02d}")
-                    scheduler.add_job(
-                        task_executor,
-                        CronTrigger(hour=hour, minute=minute),
-                        args=[task_name, task_info],
-                        misfire_grace_time=180,
-                    )
+    async def _execute_morning_task(**kwargs):
+        task_info = kwargs.get("task_info") or scheduledTasks.get("早安", {})
+        return await task_executor("早安", task_info)
+
+    async def _execute_night_task(**kwargs):
+        task_info = kwargs.get("task_info") or scheduledTasks.get("晚安", {})
+        return await task_executor("晚安", task_info)
+
+    async def _execute_custom_post_task(**kwargs):
+        task_name = kwargs.get("task_name", "早安")
+        task_info = kwargs.get("task_info") or scheduledTasks.get(task_name, {})
+        return await task_executor(task_name, task_info)
+
+    async def _execute_vtuber_daily(**kwargs):
+        return await vtuber_daily_task()
+
+    async def _execute_comment_reply(**kwargs):
+        return await check_and_reply_comments()
+
+    async def _execute_keepalive(**kwargs):
+        alive = await check_cookie_alive()
+        if alive:
+            logger.info("[Qzone 保活] Cookie 状态有效，空间在线")
+        else:
+            logger.warning("[Qzone 保活] 检测到 QQ 空间 Cookie 可能已失效！")
+            await handle_cookie_expired("空间保活探测失效")
+            cookie_cfg = config.qq_zone.config.get("cookie设置", {})
+            if cookie_cfg.get("失效时自动重新登陆", False):
+                logger.warning("[Qzone 保活] 配置开启了自动重新登陆，尝试拉起登录二维码...")
+                await login_task_wrapper()
+
+    DynamicScheduler.register_tool("qzone_morning", _execute_morning_task)
+    DynamicScheduler.register_tool("qzone_早安", _execute_morning_task)
+    DynamicScheduler.register_tool("qzone_night", _execute_night_task)
+    DynamicScheduler.register_tool("qzone_晚安", _execute_night_task)
+    DynamicScheduler.register_tool("qzone_post_task", _execute_custom_post_task)
+    DynamicScheduler.register_tool("qzone_vtuber_daily", _execute_vtuber_daily)
+    DynamicScheduler.register_tool("qzone_comment_reply", _execute_comment_reply)
+    DynamicScheduler.register_tool("qzone_keepalive", _execute_keepalive)
 
     async def init_background_services():
         nonlocal login_result
@@ -2097,7 +2073,7 @@ def main(bot: ExtendBot, config: YAMLManager):
             if state.get("active_instance") is not current_instance:
                 return
             if state.get("bg_started"):
-                logger.info("[Qzone] 后台监控服务已在运行中，无需重复启动")
+                logger.info("[Qzone] 后台服务与任务已在运行中，无需重复启动")
                 try:
                     await fetch_cookie_from_onebot()
                 except Exception as e:
@@ -2112,14 +2088,14 @@ def main(bot: ExtendBot, config: YAMLManager):
             except Exception as e:
                 logger.warning(f"[Qzone] 启动同步 OneBot 凭证提示: {e}")
 
-            create_dynamic_jobs()
-            scheduler.start()
-            logger.info("[Qzone] 定时发空间调度器已启动")
-
-            t_keep = asyncio.create_task(start_keepalive_monitor())
-            t_comm = asyncio.create_task(start_comment_monitor())
-            t_vtube = asyncio.create_task(start_vtuber_daily_monitor())
-            current_instance.background_tasks.extend([t_keep, t_comm, t_vtube])
+            # 接入统一的框架级动态定时任务引擎 DynamicScheduler
+            try:
+                dynamic_sched = get_scheduler(bot=bot, config=config)
+                dynamic_sched.start()
+                await dynamic_sched.sync_qzone_tasks_from_config()
+                logger.info("[Qzone] 已成功向 DynamicScheduler 动态同步 QQ 空间定时任务！")
+            except Exception as e:
+                logger.error(f"[Qzone] 同步定时任务到 DynamicScheduler 异常: {e}", exc_info=True)
 
     @bot.on(LifecycleMetaEvent)
     async def on_lifecycle(event: LifecycleMetaEvent):

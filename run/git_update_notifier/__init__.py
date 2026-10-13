@@ -1,1 +1,1 @@
-plugin_description = "Git远程仓库更新定时检查与汇报插件"
+plugin_description = "git仓库更新监测"

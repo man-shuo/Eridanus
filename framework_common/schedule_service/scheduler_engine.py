@@ -175,6 +175,26 @@ class DynamicScheduler:
     # 时间与下次触发时间计算
     # -------------------------------------------------------------------------
     @staticmethod
+    def parse_interval_seconds(time_str: str, default: int = 60) -> int:
+        """解析定时间隔字符串，如 '180', '180s', '60m', '30分钟', '1h' -> 秒数"""
+        s = str(time_str).strip().lower()
+        if s.isdigit():
+            return max(1, int(s))
+        m = re.match(r'^(\d+)\s*(s|sec|second|seconds|秒|m|min|minute|minutes|分|分钟|h|hour|hours|小时|d|day|days|天)?$', s)
+        if m:
+            val = int(m.group(1))
+            unit = m.group(2) or 's'
+            if unit in ('s', 'sec', 'second', 'seconds', '秒'):
+                return max(1, val)
+            elif unit in ('m', 'min', 'minute', 'minutes', '分', '分钟'):
+                return max(1, val * 60)
+            elif unit in ('h', 'hour', 'hours', '小时'):
+                return max(1, val * 3600)
+            elif unit in ('d', 'day', 'days', '天'):
+                return max(1, val * 86400)
+        return max(1, default)
+
+    @staticmethod
     def parse_time_str_to_hour_minute(time_str: str) -> Tuple[int, int]:
         """从各种格式解析出小时与分钟，默认 08:00"""
         s = time_str.strip()
@@ -197,6 +217,11 @@ class DynamicScheduler:
         """根据循环模式和时区计算任务的下一个触发时间戳 (UTC epoch seconds)"""
         now_ts = time.time()
         user_tz, _, _ = TimezoneHelper.resolve_timezone(city_or_tz)
+
+        # 0. 间隔循环类型 (recur_type == 'interval')
+        if recur_type == "interval":
+            interval_sec = cls.parse_interval_seconds(time_str, default=60)
+            return now_ts + interval_sec
 
         # 1. 相对时间匹配（如 "now", "立即", "马上", "30m", "30分钟后", "2小时后", "+15m"）
         if recur_type == "once" and time_str.strip().lower() in ("now", "立即", "马上", "立刻", "当前"):
@@ -244,6 +269,10 @@ class DynamicScheduler:
         if task.recur_type == "once":
             return None
 
+        if task.recur_type == "interval":
+            interval_sec = cls.parse_interval_seconds(task.time_str, default=60)
+            return time.time() + interval_sec
+
         weekdays = task.get_weekdays_list()
         if task.recur_type == "workday":
             weekdays = [0, 1, 2, 3, 4]
@@ -261,8 +290,6 @@ class DynamicScheduler:
         )
         return next_bot_dt.timestamp()
 
-    # -------------------------------------------------------------------------
-    # 任务持久化增删查
     # -------------------------------------------------------------------------
     async def add_task(
         self,
@@ -602,6 +629,8 @@ class DynamicScheduler:
                         res = await func(**kwargs_to_pass)
                     else:
                         res = func(**kwargs_to_pass)
+                        if inspect.isawaitable(res):
+                            res = await res
 
                     # 若工具返回了字符串或消息结果，协助发送
                     if res is not None and bot:
@@ -859,6 +888,127 @@ class DynamicScheduler:
                     )
                 except Exception as e:
                     logger.error(f"[DynamicScheduler] 为用户 {uid} 安排问候任务失败: {e}")
+
+    async def sync_qzone_tasks_from_config(self):
+        """
+        从 qq_zone 插件配置文件中读取任务配置并动态同步到调度表中：
+        - 定时发空间（早安/晚安等每日任务，每天定时触发 tool: qzone_morning / qzone_night）
+        - vtuber日常互动（巡检间隔，interval 周期触发 tool: qzone_vtuber_daily）
+        - 动态互动（空间好友评论巡检，interval 周期触发 tool: qzone_comment_reply）
+        - cookie设置（保活探测，interval 周期触发 tool: qzone_keepalive）
+        """
+        if not self.config or not hasattr(self.config, "qq_zone"):
+            logger.info("[DynamicScheduler] 未找到 qq_zone 配置，跳过同步")
+            return
+
+        try:
+            qzone_cfg = getattr(self.config.qq_zone, "config", {}) or {}
+        except Exception as e:
+            logger.warning(f"[DynamicScheduler] 读取 qq_zone 配置失败: {e}")
+            return
+
+        master_id = 0
+        try:
+            if hasattr(self.config, "common_config"):
+                master_id = int(self.config.common_config.basic_config.get("master", {}).get("id", 0) or 0)
+        except Exception:
+            pass
+
+        # 1. 同步【定时发空间】任务（如早安、晚安）
+        scheduled_posts = qzone_cfg.get("定时发空间", {})
+        for task_name, task_info in scheduled_posts.items():
+            task_id = f"qzone_post_{task_name}"
+            tool_name = f"qzone_{task_name}" if task_name in ("早安", "晚安") else "qzone_post_task"
+            if not task_info.get("enable", False):
+                await self.remove_task(task_id)
+                continue
+
+            raw_time = str(task_info.get("time", "8/30"))
+            hour, minute = self.parse_time_str_to_hour_minute(raw_time)
+            time_str = f"{hour:02d}:{minute:02d}"
+
+            await self.add_task(
+                creator_id=master_id,
+                target_type="private",
+                target_id=master_id,
+                task_type="qzone_post",
+                time_str=time_str,
+                recur_type="daily",
+                action_type="tool",
+                action_payload={
+                    "tool_name": tool_name,
+                    "tool_params": {"task_name": task_name, "task_info": dict(task_info)}
+                },
+                description=f"QQ空间定时说说 [{task_name}] (每天 {time_str})",
+                task_id=task_id,
+            )
+            logger.info(f"[DynamicScheduler] QQ空间定时任务已同步: {task_id} -> 每天 {time_str}")
+
+        # 2. 同步【vtuber日常互动】
+        vtuber_cfg = qzone_cfg.get("vtuber日常互动", {})
+        vtuber_task_id = "qzone_vtuber_daily"
+        if vtuber_cfg.get("enable", True):
+            interval_min = max(10, int(vtuber_cfg.get("巡检间隔_分钟", 60)))
+            vtuber_time_str = f"{interval_min * 60}s"
+            await self.add_task(
+                creator_id=master_id,
+                target_type="private",
+                target_id=master_id,
+                task_type="qzone_vtuber_daily",
+                time_str=vtuber_time_str,
+                recur_type="interval",
+                action_type="tool",
+                action_payload={"tool_name": "qzone_vtuber_daily"},
+                description=f"QQ空间Vtuber日常巡检 (每 {interval_min} 分钟)",
+                task_id=vtuber_task_id,
+            )
+            logger.info(f"[DynamicScheduler] QQ空间Vtuber日常巡检已同步: {vtuber_task_id} -> 每 {interval_min} 分钟")
+        else:
+            await self.remove_task(vtuber_task_id)
+
+        # 3. 同步【动态互动】（好友评论自动回复巡检）
+        inter_cfg = qzone_cfg.get("动态互动", {})
+        comment_task_id = "qzone_comment_reply"
+        if inter_cfg.get("enable_comment_reply", True):
+            interval_sec = max(60, int(inter_cfg.get("check_interval_秒", 180)))
+            comment_time_str = f"{interval_sec}s"
+            await self.add_task(
+                creator_id=master_id,
+                target_type="private",
+                target_id=master_id,
+                task_type="qzone_comment_reply",
+                time_str=comment_time_str,
+                recur_type="interval",
+                action_type="tool",
+                action_payload={"tool_name": "qzone_comment_reply"},
+                description=f"QQ空间动态评论回复巡检 (每 {interval_sec} 秒)",
+                task_id=comment_task_id,
+            )
+            logger.info(f"[DynamicScheduler] QQ空间评论回复巡检已同步: {comment_task_id} -> 每 {interval_sec} 秒")
+        else:
+            await self.remove_task(comment_task_id)
+
+        # 4. 同步【cookie设置】保活探测
+        cookie_cfg = qzone_cfg.get("cookie设置", {})
+        keepalive_task_id = "qzone_keepalive"
+        if cookie_cfg.get("保活", True):
+            keepalive_sec = max(600, int(cookie_cfg.get("保活间隔_秒", 1800)))
+            keepalive_time_str = f"{keepalive_sec}s"
+            await self.add_task(
+                creator_id=master_id,
+                target_type="private",
+                target_id=master_id,
+                task_type="qzone_keepalive",
+                time_str=keepalive_time_str,
+                recur_type="interval",
+                action_type="tool",
+                action_payload={"tool_name": "qzone_keepalive"},
+                description=f"QQ空间Cookie温和保活巡检 (每 {keepalive_sec} 秒)",
+                task_id=keepalive_task_id,
+            )
+            logger.info(f"[DynamicScheduler] QQ空间保活巡检已同步: {keepalive_task_id} -> 每 {keepalive_sec} 秒")
+        else:
+            await self.remove_task(keepalive_task_id)
 
     async def tick(self):
         """单次调度扫描：检测到达触发时间的任务并执行，更新下一次触发时间"""
