@@ -5,7 +5,7 @@ remote: "origin"      # 远程仓库名称，默认 origin
 branch: "auto"        # 检查的分支，"auto" 表示自动跟随当前本地分支（如 master）
 use_mai_reply: true   # 是否调用 mai_reply 对话核心进行角色化汇报（若不可用则优雅降级为结构化汇报）
 notify_master: true   # 是否向 master 发送私聊汇报
-master_id: null       # master ID，为空或 null 时自动读取 common_config.basic_config.master.id
+master_id: ""       # master ID，为空或 null 时自动读取 common_config.basic_config.master.id
 max_commit_log_count: 10 # 提取给 LLM 的最大 commit 数量
 fetch_timeout: 45     # git fetch 超时时间（秒）
 notify_up_to_date_on_manual: true # 手动指令触发检查时，若无更新是否回复告知
