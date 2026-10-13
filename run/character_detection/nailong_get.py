@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 from developTools.event.events import GroupMessageEvent
 from framework_common.database_util.llmDB import use_folder_chara
-from run.ai_llm.service.aiReplyCore import aiReplyCore
+from run.mai_reply.service.simple_chat import simplified_chat
 from run.character_detection.func_collection import operate_group_censor
 
 
@@ -139,18 +139,30 @@ def main(bot, config):
 
         # 2. 回复/攻击
         try:
-            use_ai = getattr(config, "ai_llm", None) and config.ai_llm.config.get("llm", {}).get("aiReplyCore", False)
-            if use_ai:
+            # 使用新版 mai_reply 的简易对话接口；配置统一从 mai_reply 配置读取。
+            mai_reply = getattr(config, "mai_reply", None)
+            mai_cfg = getattr(mai_reply, "config", {}) if mai_reply else {}
+            if not isinstance(mai_cfg, dict):
+                mai_cfg = {}
+            trigger_cfg = mai_cfg.get("trigger_llm", {}) or {}
+            use_ai = bool(mai_cfg.get("enable", False) and trigger_cfg.get("enable", True))
+            # trigger_llm 优先；未单独配置时回退到 mai_reply.llm.openai。
+            llm_cfg = mai_cfg.get("llm", {}) or {}
+            openai_cfg = llm_cfg.get("openai", {}) or {}
+            keys = openai_cfg.get("api_keys", []) or []
+            api_key = trigger_cfg.get("api_key") or (keys[0] if keys else "")
+            base_url = trigger_cfg.get("base_url") or openai_cfg.get("base_url", "")
+            model = trigger_cfg.get("model") or openai_cfg.get("model", "")
+            if use_ai and base_url and model and api_key:
                 data = await bot.get_group_member_info(group_id=event.group_id, user_id=event.user_id)
                 name = data.get("data", {}).get("nickname", "该用户")
                 system_instruction = await use_folder_chara("喷子.txt")
-                reply = await aiReplyCore(
-                    [{"text": f"系统提示:{name}刚刚发送了一张{cfg['prompt']}"}],
-                    1145141919810,
-                    config,
-                    system_instruction=system_instruction,
-                    bot=bot,
-                    tools=None
+                reply = await simplified_chat(
+                    base_url=base_url,
+                    prompt=f"系统提示：{name}刚刚发送了一张{cfg['prompt']}，你很不喜欢{cfg['prompt']}",
+                    model=model,
+                    api_key=api_key,
+                    system_prompt=system_instruction or "",
                 )
                 await bot.send(event, reply, True)
             else:
