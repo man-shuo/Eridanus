@@ -21,7 +21,7 @@ def clean_markdown(text: str) -> str:
     text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
     text = re.sub(r"_{1,3}(.+?)_{1,3}", r"\1", text)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"```[\s\S]*?```", "[代码省略]", text)
+    #text = re.sub(r"```[\s\S]*?```", "[代码省略]", text)
     text = re.sub(r"`(.+?)`", r"\1", text)
     text = re.sub(r"^>\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^[\-\*]\s+", "", text, flags=re.MULTILINE)
