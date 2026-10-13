@@ -1,18 +1,32 @@
+﻿# 角色抽象图片识别与拦截配置
 抽象检测:
+  # 总开关
+  enabled: true
+  # 单项检测开关
   奶龙检测: false
+  doro检测: false
+  男娘检测: false
+  deepseek检测: false
+
+  # 动作规则（撤回、禁言）
   奶龙撤回: true
   奶龙禁言: true
-  骂奶龙:
-  - 奶龙是你叠？这么喜欢发奶龙？
-  doro检测: false
   doro撤回: true
   doro禁言: true
-  骂doro:
-  - doro是你🐴？这么喜欢发你🐴的遗照？ #自己添加
-  - 粉色奶龙
-  - 唐
-  男娘检测: false
   男娘撤回: true
   男娘禁言: true
+  deepseek撤回: true
+  deepseek禁言: true
+
+  # 触发反击语录
+  骂奶龙:
+  - 奶龙是你爹？这么喜欢发奶龙？
+  骂doro:
+  - 唐
+  - 粉色奶龙
   骂男娘:
   - 发男娘图给你超市
+  骂deepseek:
+  - 臭傻逼，还发你这蓝色生物
+  - 喜欢dicksuck的来了
+  - dicksuck是你老冯吗，这么压抑天天发
