@@ -145,7 +145,7 @@ def main(bot, config):
             if not isinstance(mai_cfg, dict):
                 mai_cfg = {}
             trigger_cfg = mai_cfg.get("trigger_llm", {}) or {}
-            use_ai = bool(mai_cfg.get("enable", False) and trigger_cfg.get("enable", True))
+            use_ai = config.character_detection.config["use_ai"]
             # trigger_llm 优先；未单独配置时回退到 mai_reply.llm.openai。
             llm_cfg = mai_cfg.get("llm", {}) or {}
             openai_cfg = llm_cfg.get("openai", {}) or {}

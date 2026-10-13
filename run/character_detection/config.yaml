@@ -1,7 +1,8 @@
 ﻿# 角色抽象图片识别与拦截配置
 抽象检测:
   # 总开关
-  enabled: true
+  enabled: false
+  use_ai: true
   # 单项检测开关
   奶龙检测: false
   doro检测: false
