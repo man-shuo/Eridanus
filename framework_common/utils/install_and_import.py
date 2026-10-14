@@ -44,15 +44,15 @@ def get_pypi_source() -> str:
                 pass
 
     return DEFAULT_PYPI_SOURCE
-
+pypi_source = get_pypi_source()
+pip_main(['config', 'set', 'global.index-url', pypi_source])
 def install_and_import(package_name, import_name=None):
     """检测模块是否已安装，若未安装则通过 pip 安装"""
     if import_name is None:
         import_name = package_name
 
     spec = importlib.util.find_spec(import_name)
-    pypi_source = get_pypi_source()
-    pip_main(['config', 'set', 'global.index-url', pypi_source])
+
     if spec is None:
         logger.warning(f"{package_name} 未安装，正在安装...")
         pip_main(['install', package_name])
