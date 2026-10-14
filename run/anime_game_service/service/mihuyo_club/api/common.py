@@ -13,7 +13,7 @@ from requests.utils import dict_from_cookiejar
 from ..model import GameRecord, GameInfo, Good, Address, BaseApiStatus, MmtData, GeetestResult, \
     GetCookieStatus, \
     CreateMobileCaptchaStatus, GetGoodDetailStatus, ExchangeStatus, GeetestResultV4, GenshinNote, GenshinNoteStatus, \
-    GetFpStatus, StarRailNoteStatus, StarRailNote, UserAccount, BBSCookies, ExchangePlan, ExchangeResult, plugin_env, \
+    GetFpStatus, StarRailNoteStatus, StarRailNote, ZZZNoteStatus, ZZZNote, UserAccount, BBSCookies, ExchangePlan, ExchangeResult, plugin_env, \
     plugin_config, QueryGameTokenQrCodeStatus
 from ..utils import generate_device_id, generate_ds, \
     get_async_retry, generate_seed_id, generate_fp_locally
@@ -49,6 +49,8 @@ URL_GENSHEN_NOTE_BBS = "https://api-takumi-record.mihoyo.com/game_record/app/gen
 URL_GENSHEN_NOTE_WIDGET = "https://api-takumi-record.mihoyo.com/game_record/genshin/aapi/widget/v2"
 URL_STARRAIL_NOTE_BBS = "https://api-takumi-record.mihoyo.com/game_record/app/hkrpg/api/note"
 URL_STARRAIL_NOTE_WIDGET = "https://api-takumi-record.mihoyo.com/game_record/app/hkrpg/aapi/widget"
+URL_ZZZ_NOTE = "https://api-takumi-record.mihoyo.com/event/game_record_zzz/api/zzz/note"
+URL_ZZZ_NOTE_OS = "https://sg-act-nap-api.hoyolab.com/event/game_record_zzz/api/zzz/note"
 URL_CREATE_VERIFICATION = "https://bbs-api.miyoushe.com/misc/api/createVerification?is_high=true"
 URL_VERIFY_VERIFICATION = "https://bbs-api.miyoushe.com/misc/api/verifyVerification"
 URL_FETCH_GAME_TOKEN_QRCODE = "https://hk4e-sdk.mihoyo.com/hk4e_cn/combo/panda/qrcode/fetch"
@@ -325,6 +327,21 @@ HEADERS_STARRAIL_STATUS_WIDGET = {
 
     "Connection": "keep-alive",
     "Host": "api-takumi-record.mihoyo.com"
+}
+# Keep this aligned with ZZZeroUID's ZZZ_HEADER.  In particular, that
+# request intentionally omits x-rpc-client_type and does not send a generic DS.
+HEADERS_ZZZ_NOTE = {
+    "x-rpc-app_version": "2.102.1",
+    "X-Requested-With": "com.mihoyo.hyperion",
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 13; PHK110 Build/SKQ1.221119.001)"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/"
+        "126.0.6478.133 Mobile Safari/537.36 miHoYoBBS/2.102.1"
+    ),
+    "Referer": "https://act.mihoyo.com/",
+    "Origin": "https://act.mihoyo.com",
+    "x-rpc-page": "v1.0.14_#/zzz",
+    "x-rpc-platform": "2",
 }
 
 IncorrectReturn = (KeyError, TypeError, AttributeError, IndexError, ValidationError, json.decoder.JSONDecodeError)
@@ -1166,6 +1183,7 @@ async def get_cookie_token_by_stoken(cookies: BBSCookies, device_id: str = None,
     """
     headers = HEADERS_PASSPORT_API.copy()
     headers["x-rpc-device_id"] = device_id if device_id else generate_device_id()
+    headers.setdefault("x-rpc-app_id", "bll8iq97cem8")
     if not cookies.stoken_v2:
         return GetCookieStatus(missing_stoken_v2=True), None
     try:
@@ -1175,12 +1193,26 @@ async def get_cookie_token_by_stoken(cookies: BBSCookies, device_id: str = None,
                     res = await client.get(
                         URL_COOKIE_TOKEN_BY_STOKEN,
                         cookies=cookies.dict(v2_stoken=True, cookie_type=True),
+                        params={
+                            "stoken": cookies.stoken_v2,
+                            "uid": cookies.bbs_uid,
+                            **({"mid": cookies.mid} if cookies.mid else {})
+                        },
                         headers=headers,
                         timeout=plugin_config.preference.timeout
                     )
                 api_result = ApiResultHandler(res.json())
                 if api_result.success:
-                    cookies.cookie_token = api_result.data["cookie_token"]
+                    cookie_token_v2 = api_result.data.get("cookie_token_v2")
+                    cookie_token = api_result.data.get("cookie_token") or cookie_token_v2
+                    if not cookie_token:
+                        raise IncorrectReturn
+                    if cookie_token_v2 or str(cookie_token).startswith("v2_"):
+                        cookies.cookie_token_v2 = cookie_token
+                        cookies.cookie_token = cookie_token
+                    else:
+                        cookies.cookie_token = cookie_token
+                        cookies.cookie_token_v2 = None
                     if not cookies.bbs_uid:
                         cookies.bbs_uid = api_result.data["uid"]
                     return GetCookieStatus(success=True), cookies
@@ -1273,6 +1305,7 @@ async def get_ltoken_by_stoken(cookies: BBSCookies, device_id: str = None, retry
     """
     headers = HEADERS_PASSPORT_API.copy()
     headers["x-rpc-device_id"] = device_id if device_id else generate_device_id()
+    headers.setdefault("x-rpc-app_id", "bll8iq97cem8")
     if not cookies.stoken_v2:
         return GetCookieStatus(missing_stoken_v2=True), None
     if not cookies.mid:
@@ -1289,7 +1322,16 @@ async def get_ltoken_by_stoken(cookies: BBSCookies, device_id: str = None, retry
                     )
                 api_result = ApiResultHandler(res.json())
                 if api_result.success:
-                    cookies.ltoken = api_result.data["ltoken"]
+                    ltoken_v2 = api_result.data.get("ltoken_v2")
+                    ltoken = api_result.data.get("ltoken") or ltoken_v2
+                    if not ltoken:
+                        raise IncorrectReturn
+                    if ltoken_v2 or str(ltoken).startswith("v2_"):
+                        cookies.ltoken_v2 = ltoken
+                        cookies.ltoken = ltoken
+                    else:
+                        cookies.ltoken = ltoken
+                        cookies.ltoken_v2 = None
                     return GetCookieStatus(success=True), cookies
                 elif api_result.login_expired:
                     logger.warning("通过 stoken 获取 ltoken: 登录失效")
@@ -1305,6 +1347,42 @@ async def get_ltoken_by_stoken(cookies: BBSCookies, device_id: str = None, retry
         else:
             logger.error("通过 stoken 获取 ltoken: 网络请求失败")
             return GetCookieStatus(network_error=True), None
+
+
+async def refresh_account_cookies(account: UserAccount, retry: bool = True) -> Tuple[
+    GetCookieStatus,
+    Optional[BBSCookies]
+]:
+    """Refresh an account's short-lived Cookie values using its Stoken.
+
+    The refresh deliberately never treats ``cookie_token`` or ``ltoken`` as a
+    refresh source.  A v1 Stoken is first upgraded to v2, then the current
+    Stoken is exchanged for a fresh Cookie Token.  LToken renewal is best
+    effort because some accounts do not have a usable ``mid``.
+    """
+    cookies = account.cookies
+    if cookies is None:
+        return GetCookieStatus(missing_bbs_uid=True), None
+    if not cookies.bbs_uid:
+        return GetCookieStatus(missing_bbs_uid=True), None
+
+    device_id = account.device_id_ios or account.device_id_android
+    if not cookies.stoken_v2 and cookies.stoken_v1:
+        stoken_status, _ = await get_stoken_v2_by_v1(cookies, device_id=device_id, retry=retry)
+        if not stoken_status:
+            return stoken_status, None
+    if not cookies.stoken_v2:
+        return GetCookieStatus(missing_stoken_v2=True), None
+
+    cookie_status, _ = await get_cookie_token_by_stoken(cookies, device_id=device_id, retry=retry)
+    if not cookie_status:
+        return cookie_status, None
+
+    if cookies.mid:
+        ltoken_status, _ = await get_ltoken_by_stoken(cookies, device_id=device_id, retry=retry)
+        if not ltoken_status:
+            logger.warning(f"账户 {account.display_name} 刷新 ltoken 失败，将继续使用已刷新的 cookie_token")
+    return GetCookieStatus(success=True), cookies
 
 
 async def get_device_fp(device_id, retry: bool = True) -> Tuple[GetFpStatus, Optional[str]]:
@@ -1630,6 +1708,102 @@ async def starrail_note(account: UserAccount) -> Tuple[
                     return StarRailNoteStatus(network_error=True), None
     if flag:
         return StarRailNoteStatus(no_starrail_account=True), None
+
+
+async def zzz_note(account: UserAccount, retry: bool = True) -> Tuple[
+    Union[BaseApiStatus, ZZZNoteStatus],
+    Optional[ZZZNote]
+]:
+    """获取绝区零实时便签。"""
+    game_record_status, records = await get_game_record(account, retry=retry)
+    if not game_record_status:
+        return ZZZNoteStatus(
+            game_record_failed=True,
+            login_expired=game_record_status.login_expired,
+            network_error=game_record_status.network_error,
+            incorrect_return=game_record_status.incorrect_return,
+        ), None
+
+    record = next((item for item in records or [] if item.game_id == 8), None)
+    if not record:
+        return ZZZNoteStatus(no_zzz_account=True), None
+
+    params = {"role_id": record.game_role_id, "server": record.region}
+    url = URL_ZZZ_NOTE_OS if len(str(record.game_role_id)) >= 10 else URL_ZZZ_NOTE
+    headers = HEADERS_ZZZ_NOTE.copy()
+    headers["x-rpc-device_id"] = account.device_id_ios or account.device_id_android
+    headers["x-rpc-device_fp"] = account.device_fp or generate_fp_locally()
+
+    try:
+        async for attempt in get_async_retry(retry):
+            with attempt:
+                async with httpx.AsyncClient() as client:
+                    for request_index in range(2):
+                        res = await client.get(
+                            url,
+                            headers=headers,
+                            cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
+                            params=params,
+                            timeout=plugin_config.preference.timeout,
+                        )
+                        api_result = ApiResultHandler(res.json())
+                        if api_result.retcode in (1034, 10035, 5003, 10041):
+                            if request_index == 0:
+                                # Match gsuid_core's dead-code retry. A real
+                                # captcha solver, when configured, belongs here.
+                                headers.update({
+                                    "x-rpc-challenge_game": "8",
+                                    "x-rpc-tool-verison": "v1.0.14-zzz",
+                                })
+                                continue
+                            logger.info(f"绝区零实时便签: 用户 {account.display_name} 可能被验证码拦截")
+                            logger.info(f"网络请求返回: {res.text}")
+                            return ZZZNoteStatus(need_verify=True), None
+                        if api_result.login_expired:
+                            logger.info(f"绝区零实时便签: 用户 {account.display_name} 登录失效")
+                            logger.info(f"网络请求返回: {res.text}")
+                            return ZZZNoteStatus(login_expired=True), None
+                        if api_result.retcode not in (None, 0, 1) and api_result.message not in ("成功", "OK"):
+                            logger.error(f"绝区零实时便签: 接口返回异常，retcode={api_result.retcode}, message={api_result.message}")
+                            logger.info(f"网络请求返回: {res.text}")
+                            return ZZZNoteStatus(incorrect_return=True), None
+                        if not isinstance(api_result.data, dict):
+                            logger.error("绝区零实时便签: 接口返回数据不是对象")
+                            logger.info(f"网络请求返回: {res.text}")
+                            raise TypeError
+                        break
+
+                energy = api_result.data.get("energy") or {}
+                progress = energy.get("progress") or {}
+                vitality = api_result.data.get("vitality") or {}
+                vhs_sale = api_result.data.get("vhs_sale") or {}
+                bounty = (
+                    api_result.data.get("s2_bounty_commission")
+                    or api_result.data.get("s1_bounty_commission")
+                    or api_result.data.get("bounty_commission")
+                    or {}
+                )
+                weekly = api_result.data.get("weekly_task") or {}
+                note = ZZZNote(
+                    current_energy=progress.get("current"),
+                    max_energy=progress.get("max"),
+                    energy_restore_time=energy.get("restore"),
+                    current_vitality=vitality.get("current"),
+                    max_vitality=vitality.get("max"),
+                    card_sign=api_result.data.get("card_sign"),
+                    vhs_sale_state=vhs_sale.get("sale_state"),
+                    bounty_num=bounty.get("num"),
+                    bounty_total=bounty.get("total"),
+                    weekly_num=weekly.get("cur_point"),
+                    weekly_total=weekly.get("max_point"),
+                )
+                return ZZZNoteStatus(success=True), note
+    except tenacity.RetryError as e:
+        if is_incorrect_return(e):
+            logger.error("绝区零实时便签: 服务器没有正确返回")
+            return ZZZNoteStatus(incorrect_return=True), None
+        logger.error("绝区零实时便签: 请求失败")
+        return ZZZNoteStatus(network_error=True), None
 
 
 async def create_verification(

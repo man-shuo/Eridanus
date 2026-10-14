@@ -48,8 +48,12 @@ async def link_prising(url,filepath=None,proxy=None,type=None,credential_bili=No
     if url in linking_cache:
         #代表有缓存，开始判断返回
         try:
-            if type != 'QQ_Check' and os.path.exists(linking_cache[url]['path']):
-                return linking_cache[url]['info']
+            cached_info = linking_cache[url]['info']
+            # 视频地址通常是带过期时间的临时 CDN 地址，不能和封面图一样长期复用。
+            # 图片解析结果仍可复用；QQ 小程序保持原有的快速返回行为。
+            cached_is_video = cached_info.get('video_url', False) is not False
+            if type != 'QQ_Check' and not cached_is_video and os.path.exists(linking_cache[url]['path']):
+                return cached_info
         except:pass
         if type == 'QQ_Check':
             return linking_cache[url]['info']
@@ -181,13 +185,13 @@ if __name__ == "__main__":#测试用，不用管
     url = 'https://weibo.com/6625787085/5245617985290482'
     url = 'https://x.com/hn_luotianyi712/status/2003787316100509941?s=46'
     url = 'https://x.com/h_ta6_h_h_ta6_h/status/2004134080229908552?s=46'
-    url = 'https://www.bilibili.com/video/BV1mrjN6qE4C/?spm_id_from=333.1387.upload.video_card.click'
-    url = 'https://b23.tv/3JR5bfD'
-    url = 'https://t.bilibili.com/1217329482778542083?spm_id_from=333.1387.0.0'
-    url = 'https://t.bilibili.com/1217764206464466978'
-    url = 'https://www.bilibili.com/video/BV1vvjR6REyP'
-    url = '【那你的梦呢 仪玄？-哔哩哔哩】 https://b23.tv/SFkYzoC'
-    url = 'https://v.douyin.com/60S0MS-C9DY'
+    # url = 'https://www.bilibili.com/video/BV1mrjN6qE4C/?spm_id_from=333.1387.upload.video_card.click'
+    # url = 'https://b23.tv/3JR5bfD'
+    # url = 'https://t.bilibili.com/1217329482778542083?spm_id_from=333.1387.0.0'
+    # url = 'https://t.bilibili.com/1217764206464466978'
+    # url = 'https://www.bilibili.com/video/BV1vvjR6REyP'
+    # url = '【那你的梦呢 仪玄？-哔哩哔哩】 https://b23.tv/SFkYzoC'
+    # url = 'https://b23.tv/RHtz2mO'
     #url = 'https://live.bilibili.com/9576151'
     #url = 'http://xhslink.cn/o/4DZvlOLnu8q'
     #url = 'https://v.douyin.com/cZUlzDmvtok/ 09/15 :7pm oQk:/ N@J.VY '
@@ -202,5 +206,4 @@ if __name__ == "__main__":#测试用，不用管
     # if info['status'] and info['content']['type'] == 'dynamic':
     #     if info['content']['opus_type'] == 'DYNAMIC_TYPE_FORWARD' and info['content']['text'].strip().startswith(('恭喜@',)):
     #         print('已过滤')
-
 

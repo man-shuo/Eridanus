@@ -10,9 +10,10 @@ from pydantic import BaseModel
 
 __all__ = ["root_path", "data_path", "BaseModelWithSetter", "BaseModelWithUpdate", "Good", "GameRecord", "GameInfo",
            "Address", "MmtData",
-           "Award", "GameSignInfo", "MissionData", "MissionState", "GenshinNote", "StarRailNote", "GenshinNoteNotice",
-           "StarRailNoteNotice", "BaseApiStatus", "CreateMobileCaptchaStatus", "GetCookieStatus", "GetGoodDetailStatus",
+           "Award", "GameSignInfo", "MissionData", "MissionState", "GenshinNote", "StarRailNote", "ZZZNote",
+           "GenshinNoteNotice", "StarRailNoteNotice", "BaseApiStatus", "CreateMobileCaptchaStatus", "GetCookieStatus", "GetGoodDetailStatus",
            "ExchangeStatus", "MissionStatus", "GetFpStatus", "BoardStatus", "GenshinNoteStatus", "StarRailNoteStatus",
+           "ZZZNoteStatus",
            "QueryGameTokenQrCodeStatus", "GeetestResult", "GeetestResultV4", "CommandUsage"]
 
 root_path = Path(__file__).parent.parent.absolute()
@@ -461,6 +462,41 @@ class StarRailNote(BaseModel):
             return None
 
 
+class ZZZNote(BaseModel):
+    """绝区零实时便签数据。"""
+
+    current_energy: Optional[int] = None
+    max_energy: Optional[int] = None
+    energy_restore_time: Optional[int] = None
+    current_vitality: Optional[int] = None
+    max_vitality: Optional[int] = None
+    card_sign: Optional[str] = None
+    vhs_sale_state: Optional[str] = None
+    bounty_num: Optional[int] = None
+    bounty_total: Optional[int] = None
+    weekly_num: Optional[int] = None
+    weekly_total: Optional[int] = None
+
+    @property
+    def energy_recover_text(self):
+        """剩余电量恢复文本。"""
+        if self.energy_restore_time is None:
+            return ':未获得时间数据'
+        if self.energy_restore_time <= 0:
+            return '已准备就绪'
+        recovery_timestamp = int(time.time()) + self.energy_restore_time
+        recovery_datetime = datetime.fromtimestamp(recovery_timestamp)
+        return f"将在{recovery_datetime.strftime('%m-%d %H:%M')}回满"
+
+    @property
+    def card_sign_text(self):
+        return '已抽奖' if self.card_sign and 'Done' in self.card_sign else '未抽奖'
+
+    @property
+    def vhs_sale_text(self):
+        return '正在营业' if self.vhs_sale_state and 'Doing' in self.vhs_sale_state else '尚未营业'
+
+
 class GenshinNoteNotice(GenshinNote):
     """
     原神便笺通知状态
@@ -625,6 +661,13 @@ class StarRailNoteStatus(BoardStatus):
     """
     no_starrail_account: bool = False
     """用户没有任何星铁账户"""
+
+
+class ZZZNoteStatus(BoardStatus):
+    """绝区零实时便签返回结果。"""
+
+    no_zzz_account: bool = False
+    """用户没有任何绝区零账户"""
 
 
 class QueryGameTokenQrCodeStatus(BaseApiStatus):

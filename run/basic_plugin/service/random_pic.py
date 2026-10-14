@@ -44,7 +44,8 @@ async def random_today_pic(num = 1, tag = '贫乳',custom_url=None):
         #pprint.pprint(img_info)
         if 'items' in img_info:
             for item in img_info['items']:
-                img_path = item['full_url']
+                #img_path = item['full_url']
+                img_path = await download_img(item['full_url'])
                 info_json['img'].append(img_path)
         else:
             for item in img_info:

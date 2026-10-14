@@ -71,6 +71,12 @@ async def download_video(url, proxy: str = None, ext_headers=None,filepath=None)
     :param proxy: 可选，下载视频时使用的代理服务器的URL。
     :return: 保存视频的路径。
     """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("视频下载地址不能为空")
+    if filepath is None:
+        filepath = filepath_init
+    os.makedirs(filepath, exist_ok=True)
+
     # 使用时间戳生成文件名，确保唯一性
     #path = os.path.join(os.getcwd(), f"{int(time.time())}.mp4")
     path=filepath+f"{int(time.time())}.mp4"
@@ -93,16 +99,27 @@ async def download_video(url, proxy: str = None, ext_headers=None,filepath=None)
         client_config['proxies'] = { 'https': proxy }
 
     # 下载文件
+    download_completed = False
     try:
         async with httpx.AsyncClient(**client_config) as client:
             async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
                 async with aiofiles.open(path, "wb") as f:
                     async for chunk in resp.aiter_bytes():
                         await f.write(chunk)
+                download_completed = True
         return path
     except Exception as e:
         print(f"下载视频错误原因是: {e}")
-        return None
+        # 流内容已经完整读完时，关闭响应阶段的异常不应丢弃可用文件。
+        if download_completed and os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
 
 async def add_append_img(contents,links_path,layer=None):
     for link in links_path:
