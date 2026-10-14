@@ -968,10 +968,215 @@ def import_yaml(base_dir="run"):
             continue
     if failed_files:
         logger.warning(f"以下文件处理失败：{failed_files}，建议手动处理")
+
+async def youtube_cookie_and_login_helper():
+    cookie_dir = os.path.join("data", "cookies")
+    target_cookie_path = os.path.join(cookie_dir, "youtube_cookies.txt")
+    os.makedirs(cookie_dir, exist_ok=True)
+
+    while True:
+        try:
+            from run.streaming_media.service.youtube.youtube_tools import find_youtube_cookie_file, test_youtube_connection
+            current_cookie = find_youtube_cookie_file()
+        except Exception:
+            current_cookie = target_cookie_path if os.path.exists(target_cookie_path) else None
+            test_youtube_connection = None
+
+        status_msg = f"已生效 ({current_cookie})" if current_cookie else "未配置 (当前尝试移动端免登录策略)"
+
+        print("\n" + "=" * 62)
+        print("           YouTube 登录与 Cookie 配置向导")
+        print("=" * 62)
+        print(f"当前 Cookie 状态: {status_msg}")
+        print("""
+说明：YouTube 近期反爬严格，直接下载常提示：
+      "Sign in to confirm you're not a bot"
+配置 Cookie 可以彻底解决人机验证和风控拦截问题。
+
+请选择操作：
+  [1]. 导入本地已导出的 cookies.txt 文件 (推荐，最稳定)
+  [2]. 在终端直接粘贴 cookies.txt 内容并保存
+  [3]. 尝试自动从本机浏览器(Edge/Chrome/Firefox)提取 Cookie
+  [4]. 测试当前 YouTube 连接与 Cookie 有效性
+  [5]. 查看获取 YouTube cookies.txt 的详细图文步骤
+  [6]. 旧版 pytubefix 网页设备码 OAuth 授权登录
+  [0]. 返回主菜单
+""")
+        sub_choice = input("请输入选项序号 [0-6]：").strip()
+
+        if sub_choice == "1":
+            print("\n--- 导入本地 cookies.txt 文件 ---")
+            print("提示：可以将文件直接拖入终端，或直接按回车检查当前目录的 cookies.txt")
+            file_path = input("请输入 cookies.txt 的路径: ").strip().strip('"').strip("'")
+            if not file_path:
+                if os.path.exists("cookies.txt"):
+                    file_path = "cookies.txt"
+                elif os.path.exists(os.path.join("data", "cookies.txt")):
+                    file_path = os.path.join("data", "cookies.txt")
+
+            if file_path and os.path.isfile(file_path):
+                try:
+                    shutil.copyfile(file_path, target_cookie_path)
+                    logger.info(f"✅ Cookie 文件已成功保存至: {target_cookie_path}")
+                    print("\n正在验证 YouTube 连接...")
+                    if test_youtube_connection:
+                        ok, res = test_youtube_connection()
+                        if ok:
+                            logger.info(f"🎉 验证成功！视频测试解析正常: 《{res.get('title')}》")
+                        else:
+                            logger.warning(f"⚠️ 解析测试出现警告/失败: {res}")
+                except Exception as e:
+                    logger.error(f"复制 Cookie 文件失败: {e}")
+            else:
+                logger.error(f"未找到指定的有效文件: {file_path}")
+
+        elif sub_choice == "2":
+            print("\n--- 粘贴 cookies.txt 文本内容 ---")
+            print("请复制 cookies.txt 的文本内容并在此粘贴。")
+            print("输入完成后，在新的一行输入 'EOF' 或连续按两次回车完成保存：")
+            lines_input = []
+            while True:
+                try:
+                    line = input()
+                    if line.strip() == "EOF":
+                        break
+                    if not line and lines_input and not lines_input[-1]:
+                        lines_input.pop()
+                        break
+                    lines_input.append(line)
+                except EOFError:
+                    break
+
+            content = "\n".join(lines_input).strip()
+            if content:
+                try:
+                    with open(target_cookie_path, "w", encoding="utf-8") as f:
+                        f.write(content + "\n")
+                    logger.info(f"✅ Cookie 内容已写入: {target_cookie_path}")
+                    print("\n正在验证 YouTube 连接...")
+                    if test_youtube_connection:
+                        ok, res = test_youtube_connection()
+                        if ok:
+                            logger.info(f"🎉 验证成功！视频测试解析正常: 《{res.get('title')}》")
+                        else:
+                            logger.warning(f"⚠️ 解析测试出现警告/失败: {res}")
+                except Exception as e:
+                    logger.error(f"保存 Cookie 失败: {e}")
+            else:
+                logger.warning("未输入任何内容，取消保存。")
+
+        elif sub_choice == "3":
+            print("\n--- 从本机浏览器提取 Cookie ---")
+            print("⚠️ 注意事项：")
+            print("1. Windows 下 Chromium 内核(Edge/Chrome)对 Cookie 数据库加有独占文件锁。")
+            print("2. 提取前请务必【完全关闭】目标浏览器（包括后台所有进程）！")
+            print("3. 部分新版 Chrome 启用了 AppBound 加密，若提取失败请优先使用选项 [1] 导入文件。")
+            print("\n支持的浏览器: [1] edge  [2] chrome  [3] firefox  [4] brave  [5] vivaldi")
+            b_choice = input("请选择浏览器序号 (默认 1 Edge): ").strip()
+            b_map = {"1": "edge", "2": "chrome", "3": "firefox", "4": "brave", "5": "vivaldi", "": "edge"}
+            browser_name = b_map.get(b_choice, "edge")
+
+            print(f"正在尝试从 {browser_name} 提取 YouTube Cookie...")
+            try:
+                from yt_dlp.cookies import extract_cookies_from_browser
+                jar = extract_cookies_from_browser(browser_name)
+                jar.save(target_cookie_path, ignore_discard=True, ignore_expires=True)
+                logger.info(f"✅ 成功从 {browser_name} 提取并保存 Cookie 到: {target_cookie_path}")
+                print("\n正在验证 YouTube 连接...")
+                if test_youtube_connection:
+                    ok, res = test_youtube_connection()
+                    if ok:
+                        logger.info(f"🎉 验证成功！视频测试解析正常: 《{res.get('title')}》")
+                    else:
+                        logger.warning(f"⚠️ 解析测试出现警告/失败: {res}")
+            except Exception as e:
+                logger.error(f"提取浏览器 Cookie 失败: {e}")
+                logger.warning("提示：如果提示数据库被占用或找不到文件，建议完全退出浏览器后重试，或使用选项 [1] 手动导入 cookies.txt。")
+
+        elif sub_choice == "4":
+            print("\n--- 测试当前 YouTube 连接与 Cookie 状态 ---")
+            print("正在连接 YouTube 并尝试解析测试视频...")
+            if test_youtube_connection:
+                ok, res = test_youtube_connection()
+                if ok:
+                    print("\n" + "-" * 45)
+                    print("✅ 状态：测试成功！YouTube 可以正常解析。")
+                    print(f"📌 标题: {res.get('title')}")
+                    print(f"👤 作者: {res.get('uploader')}")
+                    print(f"⏱️ 时长: {res.get('duration')} 秒")
+                    print(f"🍪 凭据: {res.get('cookie_used')}")
+                    print("-" * 45)
+                else:
+                    print("\n" + "-" * 45)
+                    print("❌ 状态：解析失败！")
+                    print(f"错误信息: {res}")
+                    print("建议：请检查代理设置，或通过选项 [1] 导入登录后的 cookies.txt。")
+                    print("-" * 45)
+            else:
+                logger.error("无法导入 test_youtube_connection 函数")
+
+        elif sub_choice == "5":
+            print("\n" + "=" * 62)
+            print("            如何获取 YouTube cookies.txt 教程")
+            print("=" * 62)
+            print("""
+步骤 1: 安装浏览器扩展
+  - 推荐使用开源安全的扩展: "Get cookies.txt LOCALLY"
+  - Edge 扩展商店: 搜索 "Get cookies.txt LOCALLY"
+  - Chrome 扩展商店: 搜索 "Get cookies.txt LOCALLY"
+  - GitHub 开源地址: https://github.com/kairi003/Get-Cookie-UX
+
+步骤 2: 登录并导出
+  1. 打开浏览器并访问 https://www.youtube.com
+  2. 登录你的 Google / YouTube 账号，确保可以正常播放视频。
+  3. 点击浏览器扩展栏中的 "Get cookies.txt LOCALLY" 图标。
+  4. 确认域名包含 youtube.com，点击 "Export" 导出保存为 cookies.txt。
+
+步骤 3: 导入到本项目
+  - 方式 A: 直接将导出的 cookies.txt 放入本项目根目录或 data/cookies/youtube_cookies.txt
+  - 方式 B: 返回当前向导菜单，选择 [1] 并输入文件路径即可自动完成导入与测试。
+""")
+            input("按回车键继续...")
+
+        elif sub_choice == "6":
+            logger.info("旧版 pytubefix 设备码 OAuth 登录")
+            logger.warning(
+                """
+                \n
+                youtube登录需要手动操作，请按照以下步骤进行：
+                0.等待链接出现
+                1.打开链接
+                2.输入input code 后面的代码
+                3.继续使用你的google账号登录
+                4.完成后，在这个页面按回车(等待结束后自动退出)
+                """
+            )
+            try:
+                from framework_common.framework_util.yamlLoader import YAMLManager
+                yamlmanager = YAMLManager.get_instance()
+                proxy = yamlmanager.common_config.basic_config.get("proxy", {}).get("http_proxy")
+                pyproxies = {"http": proxy, "https": proxy} if proxy else None
+
+                from pytubefix import YouTube
+                from pytubefix.helpers import reset_cache
+                reset_cache()
+
+                yt = YouTube(url="https://www.youtube.com/watch?v=PZnXXFrjSjg", client='IOS', proxies=pyproxies, use_oauth=True, allow_oauth_cache=True)
+                ys = yt.streams.get_audio_only()
+                logger.info("pytubefix 登录流程完成！")
+            except Exception as e:
+                logger.error(f"pytubefix 登录失败: {e}")
+
+        elif sub_choice == "0":
+            break
+        else:
+            print("无效输入，请重新输入。")
+
+
 async def main():
     setup_git_proxy_if_interactive()
     logger.info("""请输入要执行的指令：
-        [1].youtube登录
+        [1].YouTube登录与Cookie配置(解决人机验证/下载失败)
         [2].更新bot代码(常用)
         [3].playwright工具安装
         [4].开发者工具
@@ -983,34 +1188,7 @@ async def main():
         [10].退出""")
     user_input = input("请输入指令序号：").strip()
     if user_input == "1":
-        logger.info("youtube登录")
-        logger.warning(
-            """
-            \n
-            youtube登录需要手动操作，请按照以下步骤进行：
-            0.等待链接出现
-            1.打开链接
-            2.输入input code 后面的代码
-            3.继续使用你的google账号登录
-            4.完成后，在这个页面按回车(等待结束后自动退出)
-            """
-        )
-        from framework_common.framework_util.yamlLoader import YAMLManager
-
-        yamlmanager = YAMLManager.get_instance()
-        proxy = yamlmanager.common_config.basic_config.get("proxy", {}).get("http_proxy")
-        pyproxies = {
-            "http": proxy,
-            "https": proxy
-        }
-
-        from pytubefix import YouTube
-        from pytubefix.helpers import reset_cache
-        reset_cache()
-
-        yt = YouTube(url="https://www.youtube.com/watch?v=PZnXXFrjSjg", client='IOS', proxies=pyproxies, use_oauth=True,
-                     allow_oauth_cache=True)
-        ys = yt.streams.get_audio_only()
+        await youtube_cookie_and_login_helper()
     elif user_input == "2":
         updaat()
     elif user_input == "3":
