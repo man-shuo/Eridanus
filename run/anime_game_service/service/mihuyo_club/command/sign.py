@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from framework_common.manshuo_draw import *
 from ..api import BaseGameSign
 from ..api import BaseMission, get_missions_state
-from ..api.common import genshin_note, get_game_record, starrail_note
+from ..api.common import genshin_note, get_game_record, starrail_note, refresh_account_cookies
 from ..model import (MissionStatus, PluginDataManager, plugin_config, UserData, CommandUsage, GenshinNoteNotice,
                      StarRailNoteNotice)
 import pprint
@@ -109,14 +109,30 @@ def _account_cookie_dict(account) -> Dict[str, str]:
         cookie_data.setdefault("ltuid", str(cookies.bbs_uid))
         cookie_data.setdefault("account_id", str(cookies.bbs_uid))
         cookie_data.setdefault("login_uid", str(cookies.bbs_uid))
-    if cookies.stoken_v2 or cookies.stoken_v1:
-        cookie_data["stoken"] = str(cookies.stoken_v2 or cookies.stoken_v1)
-    if cookies.cookie_token_v2 and cookies.bbs_uid:
-        cookie_data.setdefault("account_id_v2", str(cookies.bbs_uid))
         cookie_data.setdefault("ltuid_v2", str(cookies.bbs_uid))
+        cookie_data.setdefault("account_id_v2", str(cookies.bbs_uid))
+    if cookies.stoken_v2 or cookies.stoken_v1:
+        # Keep the canonical stoken field and the explicit v2/v1 value so the
+        # current Passport endpoints receive the same credential shape as the
+        # Miyoushe client used by the reference implementation.
+        selected_stoken = str(cookies.stoken_v2 or cookies.stoken_v1)
+        cookie_data["stoken"] = selected_stoken
+        if cookies.stoken_v2:
+            cookie_data.setdefault("stoken_v2", str(cookies.stoken_v2))
+        if cookies.stoken_v1:
+            cookie_data.setdefault("stoken_v1", str(cookies.stoken_v1))
+        cookie_data.setdefault("stoken_v2", selected_stoken)
+    if cookies.cookie_token_v2 or cookies.cookie_token:
+        selected_cookie_token = str(cookies.cookie_token_v2 or cookies.cookie_token)
+        cookie_data.setdefault("cookie_token", selected_cookie_token)
+        cookie_data.setdefault("cookie_token_v2", selected_cookie_token)
     if cookies.mid:
         cookie_data.setdefault("account_mid_v2", str(cookies.mid))
         cookie_data.setdefault("ltmid_v2", str(cookies.mid))
+    if cookies.ltoken_v2 or cookies.ltoken:
+        selected_ltoken = str(cookies.ltoken_v2 or cookies.ltoken)
+        cookie_data.setdefault("ltoken", selected_ltoken)
+        cookie_data.setdefault("ltoken_v2", selected_ltoken)
     return cookie_data
 
 
@@ -211,7 +227,7 @@ def _normalize_target(target, user=None) -> List[str]:
     return [str(target)]
 
 
-async def _discover_targets(account) -> List[Dict[str, Any]]:
+async def _discover_targets(account, refresh_on_auth: bool = True) -> List[Dict[str, Any]]:
     uid = account.bbs_uid
     if not uid:
         return []
@@ -221,6 +237,15 @@ async def _discover_targets(account) -> List[Dict[str, Any]]:
         response = await client.get(f"{RECORD_URL}?{urllib.parse.urlencode(params)}", headers=headers)
     payload = response.json()
     if _is_auth_expired(payload):
+        if refresh_on_auth:
+            try:
+                refresh_status, _ = await refresh_account_cookies(account)
+            except Exception as error:
+                logger.warning(f"账户 {account.display_name} Cookie 刷新异常：{error}")
+            else:
+                if refresh_status:
+                    PluginDataManager.write_plugin_data()
+                    return await _discover_targets(account, refresh_on_auth=False)
         raise RuntimeError("米游社登录已失效，请重新绑定")
     if (payload.get("retcode") not in (0, 1) and payload.get("message") != "OK") or not isinstance((payload.get("data") or {}).get("list"), list):
         raise RuntimeError(payload.get("message") or "无法获取米游社游戏角色")
@@ -294,7 +319,7 @@ async def _reward_summary(account, target: Dict[str, Any], day: Any) -> Optional
     }
 
 
-async def _check_in(account, target: Dict[str, Any]) -> Dict[str, Any]:
+async def _check_in_once(account, target: Dict[str, Any]) -> Dict[str, Any]:
     try:
         info = await _request_sign_api("info", account, target, "GET")
         if _is_auth_expired(info):
@@ -327,6 +352,27 @@ async def _check_in(account, target: Dict[str, Any]) -> Dict[str, Any]:
         return {"kind": "success", "reward": reward, "total_sign_day": day}
     except Exception as error:
         return {"kind": "retryable", "reason": f"网络请求失败：{error}"}
+
+
+async def _check_in(account, target: Dict[str, Any]) -> Dict[str, Any]:
+    """Check/sign once and refresh the account Cookie exactly once on auth failure."""
+    outcome = await _check_in_once(account, target)
+    if outcome.get("kind") != "auth-expired":
+        return outcome
+
+    try:
+        refresh_status, _ = await refresh_account_cookies(account)
+    except Exception as error:
+        logger.warning(f"账户 {account.display_name} Cookie 刷新异常：{error}")
+        return outcome
+    if not refresh_status:
+        return outcome
+
+    # The account object is mutated by the refresh helpers. Persist the new
+    # short-lived values before the second and final sign-in attempt.
+    logger.info(f"账户 {account.display_name} Cookie 成功刷新")
+    PluginDataManager.write_plugin_data()
+    return await _check_in_once(account, target)
 
 #判断是否应该刷新了
 async def date_check(user_id = None, cache_info = None):

@@ -72,8 +72,6 @@ def main(bot, config):
         if target_games is None:return
         else:target_games = target_games.strip()
         bot.logger.info(f'{target_games} 便签查询')
-        await bot.send(event, f'当前该功能维护ing')
-        return
         await mys_note_check(userid, bot, event, target_games)
 
     #更改默认签到游戏
