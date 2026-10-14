@@ -8,7 +8,8 @@ def main(bot, config):
     async def random_pig_order(event: GroupMessageEvent):
         context, userid, nickname, group_id = event.pure_text, str(event.sender.user_id), event.sender.nickname, int(event.group_id)
         if context.strip() not in  ['随机小猪','随机猪猪','随机猪','随机红猪']: return
-        pig_info = await pig_random()
+        proxy = config.common_config.basic_config['proxy']['http_proxy'] if config.common_config.basic_config['proxy']['http_proxy'] else None
+        pig_info = await pig_random(proxy=proxy)
         if pig_info['status'] is True:
             await bot.send(event, Image(file=pig_info['img_path']))
         else:
