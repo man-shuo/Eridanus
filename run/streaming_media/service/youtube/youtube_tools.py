@@ -7,6 +7,8 @@ import httpx
 from framework_common.utils.install_and_import import install_and_import
 
 yt_dlp = install_and_import("yt-dlp", "yt_dlp")
+# 自动安装并加载 EJS challenge 求解库，确保 Node.js 解算 YouTube n-sig 签名正常
+install_and_import("yt-dlp-ejs", "yt_dlp_ejs")
 
 from framework_common.framework_util.yamlLoader import YAMLManager
 from framework_common.utils.utils import get_headers
@@ -80,27 +82,33 @@ def get_ydl_base_opts():
     opts = {
         "quiet": False,
         "no_warnings": False,
+        "retries": 10,
+        "fragment_retries": 10,
+        "file_access_retries": 5,
+        "socket_timeout": 30,
+        "buffersize": 1024 * 16,
+        "http_chunk_size": 10485760,
     }
     if proxy:
         opts["proxy"] = proxy
+
+    # 自动探测 Node.js 环境以解决 YouTube 提取签名运行时的需求
+    node_path = shutil.which("node")
+    if node_path:
+        opts["js_runtimes"] = {"node": {}}
 
     # 自动探测并加载 Cookie 文件
     cookie_file = find_youtube_cookie_file()
     if cookie_file:
         opts["cookiefile"] = cookie_file
         logger.info(f"已加载 YouTube Cookie 文件: {cookie_file}")
-
-    # 客户端备选方案：优先尝试移动端以规避部分网页端 Bot 风控
-    opts["extractor_args"] = {
-        "youtube": {
-            "player_client": ["android", "ios", "web"]
+    else:
+        # 未配置 Cookie 时，优先尝试免登录风控较低的客户端
+        opts["extractor_args"] = {
+            "youtube": {
+                "player_client": ["visionos", "android", "ios", "web"]
+            }
         }
-    }
-
-    # 自动探测 Node.js 环境以解决 YouTube 提取签名运行时的需求
-    node_path = shutil.which("node")
-    if node_path:
-        opts["js_runtimes"] = {"node": {"path": node_path}}
 
     return opts
 
@@ -114,17 +122,18 @@ def test_youtube_connection(video_id="QhUvJLOI6_E"):
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_opts = get_ydl_base_opts()
-    # 测试时静音部分日志
     ydl_opts["quiet"] = True
     ydl_opts["no_warnings"] = True
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            formats = [f for f in info.get("formats", []) if f.get("url")]
             return True, {
                 "title": info.get("title"),
                 "uploader": info.get("uploader"),
                 "duration": info.get("duration"),
+                "formats_count": len(formats),
                 "cookie_used": ydl_opts.get("cookiefile", "未配置(使用免登录移动端客户端)")
             }
     except Exception as e:

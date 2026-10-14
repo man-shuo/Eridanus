@@ -35,3 +35,4 @@ pycairo
 watchdog
 pypdf
 yt-dlp
+yt-dlp-ejs
