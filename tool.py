@@ -336,6 +336,33 @@ def restore_or_merge_yamls(backed_up_yamls: dict, pull_succeeded: bool):
                     logger.error(f"恢复原配置文件失败: {orig_rel_path}, error: {e}")
 
 
+def run_coroutine_sync(coro_fn):
+    """
+    在同步环境中安全地同步等待一个异步协程执行完毕并返回结果。
+    如果当前线程没有运行中的事件循环，则直接使用 asyncio.run()。
+    如果当前线程已有运行中的事件循环（例如 tool.py 的 async def main），
+    则提交到单独的工作线程中通过 asyncio.run() 独立运行并阻塞等待返回，
+    避免 'asyncio.run() cannot be called from a running event loop' 异常。
+    """
+    import concurrent.futures
+
+    def _invoke():
+        coro = coro_fn() if callable(coro_fn) else coro_fn
+        return asyncio.run(coro)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_invoke)
+            return future.result()
+    else:
+        return _invoke()
+
+
 def is_ai_configured() -> bool:
     try:
         from framework_common.framework_util.yamlLoader import YAMLManager
@@ -349,6 +376,8 @@ def is_ai_configured() -> bool:
         provider = llm.get("provider", "openai")
         provider_cfg = llm.get(provider, {})
         keys = provider_cfg.get("api_keys", [])
+        if isinstance(keys, str):
+            keys = [keys]
         if not keys:
             return False
         first_key = str(keys[0]).strip()
@@ -360,19 +389,9 @@ def is_ai_configured() -> bool:
 
 
 def ai_solve_git_update(source_url: str, initial_stdout: str, initial_stderr: str) -> tuple:
-    try:
-        from framework_common.framework_util.yamlLoader import YAMLManager
-        from run.mai_reply.service.llm_client import LLMClient
-        ym = YAMLManager.get_instance()
-        client = LLMClient(ym)
-    except Exception as e:
-        logger.error(f"初始化 AI 客户端失败: {e}")
-        return False, f"AI 初始化失败: {e}"
-
     backed_up_yamls = {}
     success = False
     default_repo_url = source_url
-
     def clean_conflicts(file_paths: list = None, **kwargs) -> str:
         if not file_paths:
             return "错误: 未提供要清理的文件列表"
@@ -380,7 +399,9 @@ def ai_solve_git_update(source_url: str, initial_stdout: str, initial_stderr: st
             file_paths = [file_paths]
         cleaned = []
         for fp in file_paths:
-            if clean_and_backup_file(fp, backed_up_yamls):
+            if isinstance(fp, str):
+                fp = fp.strip().strip("'").strip('"')
+            if fp and clean_and_backup_file(fp, backed_up_yamls):
                 cleaned.append(fp)
         logger.info(f"AI 执行 clean_conflicts，已处理文件: {cleaned}")
         return f"已成功处理并备份/清理冲突文件: {cleaned}"
@@ -517,17 +538,27 @@ def ai_solve_git_update(source_url: str, initial_stdout: str, initial_stderr: st
             logger.info(f"AI 提示: {text.strip()}")
 
     async def _run_ai():
-        return await client.chat(
-            messages=messages,
-            system_prompt=system_prompt,
-            tools=tools_map,
-            on_intermediate_text=on_intermediate_text
-        )
+        from framework_common.framework_util.yamlLoader import YAMLManager
+        from run.mai_reply.service.llm_client import LLMClient
+        ym = YAMLManager.get_instance()
+        client = LLMClient(ym)
+        try:
+            return await client.chat(
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools_map,
+                on_intermediate_text=on_intermediate_text
+            )
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
     logger.info("AI 正在分析并执行自动修复与拉取方案...")
     detail = ""
     try:
-        reply = asyncio.run(_run_ai())
+        reply = run_coroutine_sync(_run_ai)
         detail = reply or ""
         if detail:
             logger.info(f"AI 总结: {detail}")

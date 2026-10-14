@@ -1508,7 +1508,31 @@ def main(bot: ExtendBot, config: YAMLManager):
     # ---------------------------------------------------------
     # 空间好友评论自动拟人化互动回复
     # ---------------------------------------------------------
-    def is_comment_too_old(comment: dict, max_days: int = 3) -> bool:
+    def clean_comment_content(text: str) -> str:
+        """清理 QQ 空间评论中的各类 UBB 艾特标签（包含各类自定义扩展属性）以及文本前缀艾特"""
+        if not text:
+            return ""
+        # 1. 匹配所有 UBB @ 标签，如 @{uin:3377428814,nick:nyuyo,who:1,auto:1}
+        t = re.sub(r"@\{uin:\d+[^}]*\}\s*", "", text)
+        # 2. 匹配开头的 "回复 @xxx: " 或 "回复 xxx: " 或 "回复xxx："
+        t = re.sub(r"^回复\s*@?[^:：\s]+[：:]\s*", "", t)
+        # 3. 匹配开头的普通 "@xxx " 或 "@xxx:"
+        t = re.sub(r"^@[^\s:：]+[:：\s]*", "", t)
+        return t.strip()
+
+    def extract_target_uin(text: str) -> Optional[int]:
+        """从原始评论文本中提取被艾特/被回复目标的 QQ 号"""
+        if not text:
+            return None
+        m = re.search(r"@\{uin:(\d+)", text)
+        if m:
+            try:
+                return int(m.group(1))
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    def is_comment_too_old(comment: dict, max_days: int = 30) -> bool:
         """判断评论是否超过指定天数（默认3天/72小时前），超过则跳过不回复，3天以内未回复的正常回复"""
         import time
         from datetime import datetime, timedelta
@@ -1733,52 +1757,70 @@ def main(bot: ExtendBot, config: YAMLManager):
             shuoshuo_text = msg.get("content", "")
             comments = msg.get("commentlist") or []
 
+            # 动态汇总 Bot 的所有可能空间昵称与角色名（防漏艾特）
+            bot_names = {bot_name} if bot_name else set()
+            if login_result and login_result.get("nick"):
+                bot_names.add(str(login_result["nick"]).strip())
+            for root_c in comments:
+                if int(root_c.get("uin", 0)) == target_qq and root_c.get("name"):
+                    bot_names.add(str(root_c.get("name")).strip())
+                for sub_c in (root_c.get("list_3") or root_c.get("replies") or root_c.get("sublist") or root_c.get("replylist") or []):
+                    if int(sub_c.get("uin", 0)) == target_qq and sub_c.get("name"):
+                        bot_names.add(str(sub_c.get("name")).strip())
+
             # 收集当前说说下已有 Bot 历史回复（用于同动态防复读）
             existing_bot_replies = []
             for root_c in comments:
                 if int(root_c.get("uin", 0)) == target_qq:
-                    c_txt = re.sub(r"@\{uin:\d+,nick:[^,}]+,who:\d+\}\s*", "", root_c.get("content", "") or "").strip()
+                    c_txt = clean_comment_content(root_c.get("content", "") or "")
                     if c_txt:
                         existing_bot_replies.append(c_txt)
                 for sub_c in (root_c.get("list_3") or root_c.get("replies") or root_c.get("sublist") or root_c.get("replylist") or []):
                     if int(sub_c.get("uin", 0)) == target_qq:
-                        c_txt = re.sub(r"@\{uin:\d+,nick:[^,}]+,who:\d+\}\s*", "", sub_c.get("content", "") or "").strip()
+                        c_txt = clean_comment_content(sub_c.get("content", "") or "")
                         if c_txt:
                             existing_bot_replies.append(c_txt)
 
             recent_replies_for_this_post = []
 
-            # 扁平化提取说说下的所有评论（包含根评论与子评论/楼中楼回复）
+            # 扁平化提取说说下的所有评论（包含根评论与子评论/楼中楼多级回复），并保存兄弟评论序列与层级索引
             all_target_comments = []
             for root_c in comments:
                 # 根评论本身
                 all_target_comments.append({
                     "raw": root_c,
                     "is_sub": False,
-                    "root_c": root_c
+                    "root_c": root_c,
+                    "sub_siblings": [],
+                    "sub_idx": -1
                 })
                 # 提取根评论下的子评论/回复列表（QQ空间常见字段为 list_3，也可能为 replies、sublist、replylist）
                 sub_list = root_c.get("list_3") or root_c.get("replies") or root_c.get("sublist") or root_c.get("replylist") or []
-                for sub_c in sub_list:
+                for idx, sub_c in enumerate(sub_list):
                     all_target_comments.append({
                         "raw": sub_c,
                         "is_sub": True,
-                        "root_c": root_c
+                        "root_c": root_c,
+                        "sub_siblings": sub_list,
+                        "sub_idx": idx
                     })
+
+            max_comment_age_days = int(inter_cfg.get("max_comment_age_days", 30))
 
             for item in all_target_comments:
                 c = item["raw"]
                 is_sub = item["is_sub"]
                 root_c = item["root_c"]
+                sub_siblings = item.get("sub_siblings", [])
+                sub_idx = item.get("sub_idx", -1)
 
                 cid = str(c.get("tid") or c.get("id") or "").strip()
                 comment_uid = c.get("uin", 0)
                 comment_name = c.get("name") or c.get("nick") or "空间好友"
                 raw_comment_content = (c.get("content", "") or "").strip()
 
-                # 清理 QQ 空间 UBB 艾特标签或普通文本艾特，提取实际用户说话内容
-                comment_content = re.sub(r"@\{uin:\d+,nick:[^,}]+,who:\d+\}\s*", "", raw_comment_content)
-                comment_content = re.sub(r"^@[^ ]+\s*", "", comment_content).strip()
+                # 清理各类带附加属性的 QQ 空间 UBB 艾特标签与文本艾特前缀，提取实际用户说话内容
+                comment_content = clean_comment_content(raw_comment_content)
 
                 # 排除自己发布的评论和已经回复过的评论
                 if int(comment_uid) == target_qq:
@@ -1788,43 +1830,99 @@ def main(bot: ExtendBot, config: YAMLManager):
                 if unique_key in replied_comment_ids or unique_key in in_prog:
                     continue
 
-                # 过滤超过3天的古早评论，直接记录已处理，避免反复打扰
-                if is_comment_too_old(c, max_days=3):
-                    logger.debug(f"[Qzone 评论互动] 评论时间超过3天(古早评论)，自动跳过: {comment_name} -> {comment_content[:20]}")
+                # 过滤超过指定天数的古早评论，直接记录已处理，避免反复打扰
+                if is_comment_too_old(c, max_days=max_comment_age_days):
+                    logger.debug(f"[Qzone 评论互动] 评论时间超过{max_comment_age_days}天(古早评论)，自动跳过: {comment_name} -> {comment_content[:20]}")
                     replied_comment_ids.add(unique_key)
                     save_replied_comments(replied_comment_ids)
                     continue
 
                 # 过滤语音消息或空消息，避免对非文字内容回复
-                if not comment_content or comment_content in ["［语音］", "[语音]", "[图片]", "［图片］"]:
+                if not comment_content or comment_content in ["【语音】", "[语音]", "[图片]", "【图片】"]:
                     replied_comment_ids.add(unique_key)
                     save_replied_comments(replied_comment_ids)
                     continue
 
-                # 判断回复目标和上下文
-                # 如果是子评论：检查它是不是回复 Bot 的（或者是在 Bot 发布的根评论下回复），还是别人之间的讨论
-                root_uid = root_c.get("uin", 0)
-                target_uin = c.get("target_uin") or c.get("targetUin") or c.get("to_uin") or c.get("toUin")
+                # 判定回复目标和上下文
+                root_uid = int(root_c.get("uin", 0))
 
-                # 是否明确艾特了 Bot
+                # 提取目标 UIN（优先从字段读取，没有则从 UBB @{uin:QQ号...} 正则解析）
+                raw_target_uin = (
+                    c.get("target_uin") or
+                    c.get("targetUin") or
+                    c.get("to_uin") or
+                    c.get("toUin") or
+                    extract_target_uin(raw_comment_content)
+                )
+                target_uin = None
+                if raw_target_uin is not None:
+                    try:
+                        target_uin = int(raw_target_uin)
+                    except (ValueError, TypeError):
+                        target_uin = None
+
+                # 是否明确在正文中艾特了 Bot
                 bot_at_ubb = f"uin:{target_qq}"
-                is_mentioning_bot = bot_at_ubb in raw_comment_content or (bot_name and f"@{bot_name}" in raw_comment_content)
+                is_mentioning_bot = bot_at_ubb in raw_comment_content
+                if not is_mentioning_bot:
+                    for b_name in bot_names:
+                        if b_name and (f"@{b_name}" in raw_comment_content or f"回复 {b_name}" in raw_comment_content or f"回复@{b_name}" in raw_comment_content):
+                            is_mentioning_bot = True
+                            break
 
+                # 解析楼中楼上下文 parent_c (直接被回复的那条评论对象)
+                parent_c = None
                 if is_sub:
-                    # 子评论场景：
-                    # 1) target_uin 显式指向 bot
-                    # 2) 艾特了 bot
-                    # 3) 根评论是 bot 发布的，且当前子评论没有指定指向其他人
-                    is_reply_to_bot = (
-                        (target_uin and int(target_uin) == target_qq) or
-                        is_mentioning_bot or
-                        (int(root_uid) == target_qq and (not target_uin or int(target_uin) == target_qq))
-                    )
-                    if not is_reply_to_bot:
-                        # 既不是艾特bot也不是回复bot（例如路人A回复路人B），不予插嘴打扰，标记已读
-                        replied_comment_ids.add(unique_key)
-                        save_replied_comments(replied_comment_ids)
-                        continue
+                    if target_uin:
+                        for prev in reversed(sub_siblings[:sub_idx]):
+                            if int(prev.get("uin", 0)) == target_uin:
+                                parent_c = prev
+                                break
+                        if not parent_c and root_uid == target_uin:
+                            parent_c = root_c
+                    if not parent_c and sub_idx > 0:
+                        parent_c = sub_siblings[sub_idx - 1]
+                    elif not parent_c:
+                        parent_c = root_c
+
+                # 精确判定是否属于回复 Bot 的情况
+                is_reply_to_bot = False
+                if not is_sub:
+                    # 根评论：只要不是 Bot 自身发布的，均属于好友在 Bot 动态下的互动，应当回复
+                    is_reply_to_bot = True
+                else:
+                    # 子评论/楼中楼多级回复判定：
+                    # 1) 显式 target_uin 指向 Bot
+                    if target_uin is not None and target_uin == target_qq:
+                        is_reply_to_bot = True
+                    # 2) 文本中艾特或提及了 Bot
+                    elif is_mentioning_bot:
+                        is_reply_to_bot = True
+                    # 3) 显式 target_uin 指向了其他人（非 Bot）-> 明确是好友之间的讨论，不插嘴
+                    elif target_uin is not None and target_uin != target_qq:
+                        is_reply_to_bot = False
+                    # 4) 文本以 "回复 @其他人" 起头且该人不是 Bot
+                    elif re.search(r"^回复\s*@?([^:：\s]+)", raw_comment_content):
+                        target_name = re.search(r"^回复\s*@?([^:：\s]+)", raw_comment_content).group(1).strip()
+                        if target_name not in bot_names:
+                            is_reply_to_bot = False
+                        else:
+                            is_reply_to_bot = True
+                    # 5) 无显式指向对象：
+                    else:
+                        # 若直接上下文 parent_c 是 Bot 发言，或者没有前序兄弟评论且根评论是 Bot 发言
+                        if parent_c and int(parent_c.get("uin", 0)) == target_qq:
+                            is_reply_to_bot = True
+                        elif not parent_c and root_uid == target_qq:
+                            is_reply_to_bot = True
+                        else:
+                            is_reply_to_bot = False
+
+                if not is_reply_to_bot:
+                    # 既不是艾特bot也不是回复bot（例如路人A回复路人B），不予插嘴打扰，标记已读
+                    replied_comment_ids.add(unique_key)
+                    save_replied_comments(replied_comment_ids)
+                    continue
 
                 # 核心防重：在启动 LLM 生成前立即前置占位，锁定该 unique_key，防止任何并发巡检或重入重复处理
                 in_prog.add(unique_key)
@@ -1833,11 +1931,23 @@ def main(bot: ExtendBot, config: YAMLManager):
                     if is_sub:
                         root_name = root_c.get("name") or root_c.get("nick") or "楼主"
                         root_content = (root_c.get("content", "") or "").strip()
-                        root_content_clean = re.sub(r"@\{uin:\d+,nick:[^,}]+,who:\d+\}\s*", "", root_content).strip()
-                        if int(root_uid) == target_qq:
-                            parent_desc = f"该好友正在回复你在该说说下的留言：【{root_content_clean}】\n"
+                        root_content_clean = clean_comment_content(root_content)
+
+                        if parent_c:
+                            parent_uid = int(parent_c.get("uin", 0))
+                            parent_name = parent_c.get("name") or parent_c.get("nick") or "空间好友"
+                            parent_content_clean = clean_comment_content(parent_c.get("content", ""))
+                            if parent_uid == target_qq:
+                                parent_desc = f"该好友正在回复你在该说说下的留言：【{parent_content_clean}】\n"
+                                if root_c is not parent_c and root_uid != target_qq:
+                                    parent_desc += f"（所属根评论为 {root_name} 发布的：【{root_content_clean}】）\n"
+                            else:
+                                parent_desc = f"该好友正在楼中楼针对【{parent_name}：{parent_content_clean}】进行互动回复\n"
                         else:
-                            parent_desc = f"该好友正在楼中楼针对评论【{root_name}：{root_content_clean}】进行互动回复\n"
+                            if root_uid == target_qq:
+                                parent_desc = f"该好友正在回复你在该说说下的留言：【{root_content_clean}】\n"
+                            else:
+                                parent_desc = f"该好友正在楼中楼针对评论【{root_name}：{root_content_clean}】进行互动回复\n"
 
                     logger.info(f"[Qzone 评论互动] 发现新{'子评论' if is_sub else '根评论'} 来自: {comment_name}({comment_uid}) -> {comment_content}")
 
