@@ -61,6 +61,20 @@ def get_proxy():
 
     return None
 
+def find_youtube_cookie_file():
+    """按优先级查找 YouTube cookies 文件"""
+    candidate_paths = [
+        os.path.join("data", "cookies", "youtube_cookies.txt"),
+        os.path.join("data", "youtube_cookies.txt"),
+        os.path.join("data", "cookies.txt"),
+        "cookies.txt",
+        "youtube_cookies.txt",
+    ]
+    for path in candidate_paths:
+        if os.path.exists(path) and os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+    return None
+
 def get_ydl_base_opts():
     proxy = get_proxy()
     opts = {
@@ -70,12 +84,51 @@ def get_ydl_base_opts():
     if proxy:
         opts["proxy"] = proxy
 
+    # 自动探测并加载 Cookie 文件
+    cookie_file = find_youtube_cookie_file()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+        logger.info(f"已加载 YouTube Cookie 文件: {cookie_file}")
+
+    # 客户端备选方案：优先尝试移动端以规避部分网页端 Bot 风控
+    opts["extractor_args"] = {
+        "youtube": {
+            "player_client": ["android", "ios", "web"]
+        }
+    }
+
     # 自动探测 Node.js 环境以解决 YouTube 提取签名运行时的需求
     node_path = shutil.which("node")
     if node_path:
         opts["js_runtimes"] = {"node": {"path": node_path}}
 
     return opts
+
+def test_youtube_connection(video_id="QhUvJLOI6_E"):
+    """测试 YouTube 连接与 Cookie 有效性"""
+    global yt_dlp
+    if yt_dlp is None:
+        yt_dlp = install_and_import("yt-dlp", "yt_dlp")
+        if yt_dlp is None:
+            return False, "无法加载或安装 yt-dlp 模块"
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = get_ydl_base_opts()
+    # 测试时静音部分日志
+    ydl_opts["quiet"] = True
+    ydl_opts["no_warnings"] = True
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return True, {
+                "title": info.get("title"),
+                "uploader": info.get("uploader"),
+                "duration": info.get("duration"),
+                "cookie_used": ydl_opts.get("cookiefile", "未配置(使用免登录移动端客户端)")
+            }
+    except Exception as e:
+        return False, str(e)
 
 def audio_download(video_id, output_dir="data/voice/cache"):
     global yt_dlp

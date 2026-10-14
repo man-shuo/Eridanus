@@ -11,7 +11,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from developTools.utils.logger import get_logger
-from framework_common.utils.install_and_import import install_and_import
+from framework_common.utils.install_and_import import install_and_import, get_pypi_source
 
 logger = get_logger()
 
@@ -30,9 +30,10 @@ try:
 except ImportError:
     pip_main = None
 
-if pip_main is not None:
+pypi_source = get_pypi_source()
+if pip_main is not None and pypi_source:
     try:
-        pip_main(['config', 'set', 'global.index-url', 'https://mirrors.aliyun.com/pypi/simple/'])
+        pip_main(['config', 'set', 'global.index-url', pypi_source])
     except Exception:
         pass
 
@@ -864,7 +865,6 @@ def check_requirements(requirements_file):
                 pip_main(['install', pkg])
             else:
                 pip_main(['install', '--upgrade', pkg])
-
     if mismatched:
         print("\n版本不匹配的包(一般不用管这个)：")
         for pkg, required_version, installed_version in mismatched:
