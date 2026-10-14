@@ -34,3 +34,4 @@ pyzipper
 pycairo
 watchdog
 pypdf
+yt-dlp

@@ -57,8 +57,14 @@ class ScheduledTask:
     last_run_at: str = ""
 
     def get_payload_dict(self) -> Dict[str, Any]:
+        if isinstance(self.action_payload, dict):
+            return self.action_payload
+        if not self.action_payload:
+            return {}
         try:
-            return json.loads(self.action_payload) if self.action_payload else {}
+            if isinstance(self.action_payload, (str, bytes, bytearray)):
+                return json.loads(self.action_payload)
+            return {}
         except Exception:
             return {}
 
@@ -517,8 +523,17 @@ class DynamicScheduler:
             return None
 
         # 0. 优先从 DynamicScheduler 显式注册的自定义工具集中查找
+        alias_map = {
+            "qzone_早安": "qzone_morning",
+            "qzone_morning": "qzone_早安",
+            "qzone_晚安": "qzone_night",
+            "qzone_night": "qzone_晚安",
+        }
         if clean_name in cls._custom_tools:
             return cls._custom_tools[clean_name]
+        alt_alias = alias_map.get(clean_name)
+        if alt_alias and alt_alias in cls._custom_tools:
+            return cls._custom_tools[alt_alias]
         if f"call_{clean_name}" in cls._custom_tools:
             return cls._custom_tools[f"call_{clean_name}"]
         if clean_name.startswith("call_") and clean_name[5:] in cls._custom_tools:
@@ -606,8 +621,20 @@ class DynamicScheduler:
             if task.action_type in ("tool", "function_call"):
                 tool_name = payload.get("tool_name", "")
                 tool_params = payload.get("tool_params") or payload.get("tool_args") or {}
+                # 若因历史数据或解析问题缺少 tool_name，根据 task_type/task_id/description 智能回退识别
+                if not tool_name:
+                    if task.task_type == "qzone_post":
+                        kw = f"{task.task_id} {task.description}".lower()
+                        if "早安" in kw or "morning" in kw:
+                            tool_name = "qzone_早安"
+                        elif "晚安" in kw or "night" in kw:
+                            tool_name = "qzone_晚安"
+                        else:
+                            tool_name = "qzone_post_task"
+                    elif task.task_type in ("qzone_vtuber_daily", "qzone_comment_reply", "qzone_keepalive"):
+                        tool_name = task.task_type
 
-                func = self._find_callable_tool(tool_name)
+                func = self._find_callable_tool(tool_name) if tool_name else None
                 if func and callable(func):
                     logger.info(f"[DynamicScheduler] 触发嵌套工具 {tool_name} (参数: {tool_params})")
 
@@ -934,6 +961,7 @@ class DynamicScheduler:
                 task_type="qzone_post",
                 time_str=time_str,
                 recur_type="daily",
+                city="Asia/Shanghai",
                 action_type="tool",
                 action_payload={
                     "tool_name": tool_name,

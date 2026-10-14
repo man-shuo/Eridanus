@@ -14,7 +14,7 @@ from typing import Optional, Dict, Any
 
 import aiohttp
 import httpx
-from framework_common.schedule_service import DynamicScheduler, get_scheduler
+from framework_common.schedule_service import DynamicScheduler, get_scheduler, TimezoneHelper
 
 from run.qq_zone.service.native_login import NativeQzoneLogin
 try:
@@ -1067,7 +1067,7 @@ def main(bot: ExtendBot, config: YAMLManager):
         return used_theme_ids, list(dict.fromkeys(recent_elements)), recent_posts
 
     def get_current_time_context() -> str:
-        now = datetime.datetime.now()
+        now = TimezoneHelper.get_user_local_time('Asia/Shanghai')
         weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         weekday_str = weekday_names[now.weekday()]
         season_meta = get_current_season()
@@ -1165,7 +1165,7 @@ def main(bot: ExtendBot, config: YAMLManager):
     current_instance.last_scheduled_execution = get_task_history()
 
     async def task_executor(task_name: str, task_info: dict):
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        today_str = TimezoneHelper.get_user_local_time('Asia/Shanghai').strftime('%Y-%m-%d')
         history = get_task_history()
         last_date = history.get(task_name)
         if last_date == today_str and not task_info.get("_force_test", False):
@@ -1324,7 +1324,8 @@ def main(bot: ExtendBot, config: YAMLManager):
 
     async def vtuber_daily_task():
         nonlocal vtuber_post_count_today, vtuber_last_post_date
-        today = datetime.date.today()
+        shanghai_now = TimezoneHelper.get_user_local_time('Asia/Shanghai')
+        today = shanghai_now.date()
         if today != vtuber_last_post_date:
             vtuber_last_post_date = today
             vtuber_post_count_today = 0
@@ -1343,7 +1344,7 @@ def main(bot: ExtendBot, config: YAMLManager):
             h_start, h_end = [int(x.strip()) for x in str(active_hours).split("-")]
         except Exception:
             h_start, h_end = 10, 21
-        cur_hour = datetime.datetime.now().hour
+        cur_hour = shanghai_now.hour
         if not (h_start <= cur_hour <= h_end):
             return
 
@@ -2162,8 +2163,25 @@ def main(bot: ExtendBot, config: YAMLManager):
             await check_and_reply_comments()
 
     # 若事件循环已在运行（例如动态加载或热重载时未下发 LifecycleMetaEvent），立即排队启动后台服务
-    if bot_loop and bot_loop.is_running():
-        bot_loop.call_soon_threadsafe(lambda: asyncio.create_task(init_background_services()))
+    # 稳健排队启动后台服务与任务同步（兼顾直接运行与生命周期事件）
+    def _safe_schedule_init():
+        target_loop = bot_loop
+        if target_loop is None:
+            try:
+                target_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                target_loop = None
+        if target_loop and target_loop.is_running():
+            try:
+                curr_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                curr_loop = None
+            if curr_loop is target_loop:
+                asyncio.create_task(init_background_services())
+            else:
+                target_loop.call_soon_threadsafe(lambda: asyncio.create_task(init_background_services()))
+
+    _safe_schedule_init()
 
     @bot.on(PrivateMessageEvent)
     async def handle_private_message(event: PrivateMessageEvent):

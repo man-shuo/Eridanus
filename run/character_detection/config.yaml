@@ -2,7 +2,7 @@
 抽象检测:
   # 总开关
   enabled: false
-  use_ai: true
+  use_ai: false
   # 单项检测开关
   奶龙检测: false
   doro检测: false
