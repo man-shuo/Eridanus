@@ -63,8 +63,7 @@ for module_name, imports in dynamic_imports.items():
         logger.error(f"❌ 处理模块 {module_name} 时出错: {e}")
         traceback.print_exc()
 
-async def call_quit_chat(bot, event, config):
-    return False
+
 
 async def call_func(bot, event, config, func_name, params):
     """

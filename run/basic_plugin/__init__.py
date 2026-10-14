@@ -4,7 +4,7 @@ plugin_description = "基础功能集合"
 dynamic_imports = {
     "run.basic_plugin.basic_plugin": [
         "call_weather_query", "call_setu","call_tarot", "call_pick_music",
-        "call_fortune", "call_quit_chat","call_menu"
+        "call_fortune","call_menu"
     ],
     "run.basic_plugin.image_search":
         ["call_image_search"],
@@ -90,10 +90,6 @@ function_declarations=[
         "description": "运势占卜，返回图片。"
     },
 
-    {
-        "name": "call_quit_chat",
-        "description": "停止对话，不再接收信息"
-    },
     {
         "name": "call_menu",
         "description": "发送功能列表/菜单/帮助指令表"

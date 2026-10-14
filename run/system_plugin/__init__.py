@@ -4,7 +4,7 @@ import os
 dynamic_imports = {
     "run.system_plugin.Mface_Record": ["call_send_mface"],
     "run.system_plugin.func_collection": [
-        "call_user_data_register", "call_user_data_query", "call_user_data_sign",
+         "call_user_data_query", "call_user_data_sign",
         "call_change_city", "call_permit",
         "call_delete_user_history", "call_clear_all_history","operate_group_push_tasks"
     ],
@@ -45,10 +45,6 @@ function_declarations=[
     },
 
 
-    {
-        "name": "call_user_data_register",
-        "description": "在数据库中注册用户"
-    },
     {
         "name": "call_user_data_query",
         "description": "查询用户数据。eg.权限等级等内容。"

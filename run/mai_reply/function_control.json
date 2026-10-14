@@ -1,7 +1,14 @@
 {
   "disabled": [
     "anime_game_service_func_collection",
-    "call_bangumi_search"
+    "call_aiArtModerate",
+    "call_bangumi_search",
+    "call_user_data_query",
+    "get_all_speakers",
+    "operate_group_censor",
+    "call_delete_user_history",
+    "call_clear_all_history"
   ],
   "disabled_skills": []
 }
+

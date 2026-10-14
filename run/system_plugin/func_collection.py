@@ -46,16 +46,7 @@ async def trigger_tasks(bot,event,config,task_name):
         bot.logger.info_func("获取单向历推送")
         path = await danxianglii()
         await bot.send(event, Image(file=path))
-async def call_user_data_register(bot,event,config):
-    data = await bot.get_group_member_info(group_id=event.group_id, user_id=event.user_id)
-    r = await add_user(
-        data["data"]["user_id"],
-        data["data"]["nickname"],
-        data["data"]["card"],
-        data["data"]["sex"],
-        data["data"]["age"],
-        data["data"]["area"])
-    await bot.send(event, r)
+
 async def call_user_data_query(bot,event,config):
     if config.system_plugin.config["user_data"]["是否启用个人信息查询"] is False:
         return

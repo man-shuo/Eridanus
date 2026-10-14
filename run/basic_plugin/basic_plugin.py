@@ -39,9 +39,6 @@ async def call_menu(bot, event, config):
         await bot.send(event, reply_list)
 
 
-async def call_quit_chat(bot, event, config):
-    return False
-
 
 async def call_weather_query(bot, event, config, location=None):
     user_info = await get_user(event.user_id, event.sender.nickname)
