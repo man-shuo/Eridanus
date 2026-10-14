@@ -7,7 +7,7 @@ import pprint
 from typing import Any, Dict, Optional, Union
 from framework_common.manshuo_draw import *
 import traceback
-from ..api.common import get_ltoken_by_stoken, get_cookie_token_by_stoken, get_device_fp, fetch_game_token_qrcode, \
+from ..api.common import get_ltoken_by_stoken, get_cookie_token_by_stoken, get_stoken_v2_by_v1, get_device_fp, fetch_game_token_qrcode, \
     query_game_token_qrcode, \
     get_token_by_game_token, get_cookie_token_by_game_token
 from ..model import PluginDataManager, plugin_config, UserAccount, UserData, CommandUsage, BBSCookies, \
@@ -23,6 +23,10 @@ db=asyncio.run(AsyncSQLiteDatabase.get_instance())
 MIYOUSHE_QR_CREATE_URL = "https://passport-api.mihoyo.com/account/ma-cn-passport/web/createQRLogin"
 MIYOUSHE_QR_QUERY_URL = "https://passport-api.mihoyo.com/account/ma-cn-passport/web/queryQRLoginStatus"
 MIYOUSHE_PASSPORT_APP_ID = "bll8iq97cem8"
+MIYOUSHE_APP_QR_CREATE_URL = "https://passport-api.mihoyo.com/account/ma-cn-passport/app/createQRLogin"
+MIYOUSHE_APP_QR_QUERY_URL = "https://passport-api.mihoyo.com/account/ma-cn-passport/app/queryQRLoginStatus"
+MIYOUSHE_APP_QR_APP_ID = "ddxf5dufpuyo"
+MIYOUSHE_APP_QR_CLIENT_VERSION = "1.3.3.182"
 MIYOUSHE_PASSPORT_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
@@ -38,12 +42,19 @@ def _collect_set_cookies(headers, fallback_cookies=None) -> str:
         raw_value = headers.get("set-cookie")
         raw_values = [raw_value] if raw_value else []
 
+    # Read only the first name/value pair from each Set-Cookie line.  Parsing
+    # attributes as cookies (especially Expires) can otherwise corrupt the
+    # credential map returned by Passport.
     for raw_value in raw_values:
         if not raw_value:
             continue
-        for match in re.finditer(r"(?:^|,\s*)([^=;,\s]+)=([^;,]*)", raw_value):
-            cookies[match.group(1)] = match.group(2)
+        first = str(raw_value).split(";", 1)[0].strip()
+        name, separator, value = first.partition("=")
+        if separator and name.strip() and value:
+            cookies[name.strip()] = value.strip()
 
+    # Keep values from the response headers authoritative, while retaining
+    # any credentials only present in the response Cookie Jar.
     if fallback_cookies:
         for key, value in dict(fallback_cookies).items():
             if value:
@@ -64,7 +75,7 @@ def _parse_cookie_string(cookie: str) -> Dict[str, str]:
 
 
 def _miyoushe_account_uid(cookie_data: Dict[str, Any]) -> Optional[str]:
-    for key in ("account_id", "stuid", "ltuid", "login_uid", "account_id_v2", "ltuid_v2", "ltmid_v2"):
+    for key in ("account_id", "stuid", "ltuid", "login_uid", "account_id_v2", "ltuid_v2"):
         value = cookie_data.get(key)
         if value:
             return str(value)
@@ -78,10 +89,10 @@ def _build_bbs_cookies(cookie_data: Dict[str, str], bbs_uid: str) -> BBSCookies:
         cookies.stoken = cookie_data["stoken"]
     cookies.stoken_v1 = cookie_data.get("stoken_v1") or cookies.stoken_v1
     cookies.stoken_v2 = cookie_data.get("stoken_v2") or cookies.stoken_v2
-    cookies.cookie_token = cookie_data.get("cookie_token")
     cookies.cookie_token_v2 = cookie_data.get("cookie_token_v2")
-    cookies.ltoken = cookie_data.get("ltoken")
+    cookies.cookie_token = cookie_data.get("cookie_token") or cookies.cookie_token_v2
     cookies.ltoken_v2 = cookie_data.get("ltoken_v2")
+    cookies.ltoken = cookie_data.get("ltoken") or cookies.ltoken_v2
     cookies.login_ticket = cookie_data.get("login_ticket")
     cookies.mid = cookie_data.get("mid") or cookie_data.get("account_mid_v2") or cookie_data.get("ltmid_v2")
     cookies.aliyungf_tc = cookie_data.get("aliyungf_tc")
@@ -97,6 +108,14 @@ def _update_bbs_cookies(target: BBSCookies, source: BBSCookies) -> BBSCookies:
         value = getattr(source, key, None)
         if value is not None:
             setattr(target, key, value)
+    # A refreshed response can switch token generations.  Do not leave an
+    # older v2 value around for the sign-in Cookie builder to prefer.
+    if source.stoken_v1 and not source.stoken_v2:
+        target.stoken_v2 = None
+    if source.cookie_token and not source.cookie_token_v2:
+        target.cookie_token_v2 = None
+    if source.ltoken and not source.ltoken_v2:
+        target.ltoken_v2 = None
     return target
 
 
@@ -110,7 +129,239 @@ def _passport_qr_headers(device_id: str) -> Dict[str, str]:
     }
 
 
+def _app_qr_headers(device_id: str) -> Dict[str, str]:
+    """Headers used by the current Passport app QR flow."""
+    return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": f"HYPContainer/{MIYOUSHE_APP_QR_CLIENT_VERSION}",
+        "x-rpc-app_id": MIYOUSHE_APP_QR_APP_ID,
+        "x-rpc-client_type": "3",
+        "x-rpc-device_id": device_id,
+    }
+
+
+def _add_qr_payload_credentials(cookie_data: Dict[str, str], payload: Dict[str, Any]) -> None:
+    """Merge token/user fields returned in a confirmed QR response body."""
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        return
+    user_info = data.get("user_info") or {}
+    if isinstance(user_info, dict):
+        uid = user_info.get("aid") or user_info.get("uid") or user_info.get("account_id")
+        mid = user_info.get("mid")
+        if uid:
+            cookie_data.setdefault("account_id", str(uid))
+            cookie_data.setdefault("stuid", str(uid))
+            cookie_data.setdefault("ltuid", str(uid))
+            cookie_data.setdefault("login_uid", str(uid))
+        if mid:
+            cookie_data.setdefault("mid", str(mid))
+            cookie_data.setdefault("account_mid_v2", str(mid))
+            cookie_data.setdefault("ltmid_v2", str(mid))
+
+    tokens = data.get("tokens") or []
+    if not isinstance(tokens, list):
+        return
+    fallback_token = None
+    for item in tokens:
+        if not isinstance(item, dict) or not item.get("token"):
+            continue
+        token = str(item["token"])
+        name = str(item.get("name") or "")
+        if name == "stoken_v2" or token.startswith("v2_"):
+            cookie_data.setdefault("stoken_v2", token)
+        elif name == "stoken":
+            cookie_data.setdefault("stoken", token)
+        elif name in {"cookie_token", "cookie_token_v2", "ltoken", "ltoken_v2"}:
+            cookie_data.setdefault(name, token)
+        elif fallback_token is None:
+            fallback_token = token
+    if fallback_token and not (cookie_data.get("stoken") or cookie_data.get("stoken_v2")):
+        if fallback_token.startswith("v2_"):
+            cookie_data["stoken_v2"] = fallback_token
+        else:
+            cookie_data["stoken"] = fallback_token
+
+
+class _UseLegacyQrLogin(RuntimeError):
+    """The new Passport app endpoint is unavailable; use the old QR flow."""
+
+
+async def _mys_login_app_qr(user_id, bot=None, event=None, config=None):
+    """Login through the current Passport app QR endpoint.
+
+    ``None``-like endpoint failures are raised as ``_UseLegacyQrLogin`` so
+    callers retain the previous web QR implementation as a fallback.
+    """
+    user_id = str(user_id)
+    user_num = len(set(PluginDataManager.plugin_data.users.values()))
+    if user_num > plugin_config.preference.max_user and plugin_config.preference.max_user not in [-1, 0]:
+        if bot:
+            await bot.send(event, '⚠️目前可支持使用用户数已经满啦~')
+        else:
+            print('⚠️目前可支持使用用户数已经满啦~')
+        return False
+
+    PluginDataManager.plugin_data.users.setdefault(user_id, UserData())
+    user = PluginDataManager.plugin_data.users[user_id]
+    device_id = generate_device_id()
+    headers = _app_qr_headers(device_id)
+
+    try:
+        async with httpx.AsyncClient(timeout=plugin_config.preference.timeout) as client:
+            response = await client.post(MIYOUSHE_APP_QR_CREATE_URL, headers=headers, json={})
+        payload = response.json()
+    except Exception as error:
+        logger.warning(f"米游社 App 二维码创建失败，将回退原登录方式：{error}")
+        raise _UseLegacyQrLogin from error
+
+    if payload.get("retcode") != 0:
+        logger.warning("米游社 App 二维码接口不可用，将回退原登录方式")
+        raise _UseLegacyQrLogin
+
+    qr_data = payload.get("data") or {}
+    qrcode_url = qr_data.get("url")
+    qrcode_ticket = qr_data.get("ticket")
+    if not qrcode_url or not qrcode_ticket:
+        raise _UseLegacyQrLogin
+
+    recall_id = None
+    try:
+        image_bytes = generate_qr_img(qrcode_url)
+        base64_data = base64.b64encode(image_bytes).decode("utf-8")
+        img_path = await manshuo_draw([{'type': 'img', 'img': [base64_data]}])
+        if config is not None and bot and config.common_config.basic_config["master"]["id"] == 1270858640:
+            from run.manshuo_test.core import bot_http
+            await bot_http.set_msg_emoji_like(event, 282)
+        if bot and event:
+            recall_id = await bot.send(
+                event,
+                [At(qq=user_id),
+                 " 请用米游社App扫描下面的二维码进行登录\n二维码有效时间两分钟，请不要扫描他人的登录二维码进行绑定~",
+                 Image(file=img_path)]
+            )
+        else:
+            print(img_path)
+
+        query_times = round(
+            plugin_config.preference.qrcode_wait_time / plugin_config.preference.qrcode_query_interval
+        )
+        scanned = False
+        for _ in range(max(1, query_times)):
+            async with httpx.AsyncClient(timeout=plugin_config.preference.timeout) as client:
+                response = await client.post(
+                    MIYOUSHE_APP_QR_QUERY_URL,
+                    headers=headers,
+                    json={"ticket": qrcode_ticket}
+                )
+            payload = response.json()
+            retcode = payload.get("retcode")
+            message = str(payload.get("message") or "")
+            status = (payload.get("data") or {}).get("status")
+            if retcode != 0:
+                if retcode in (-3501, -106, -1002) or "过期" in message:
+                    if bot:
+                        await bot.send(event, [At(qq=user_id), " 扫码超时喵，请重新绑定喵 "])
+                    else:
+                        print(" 扫码超时喵，请重新绑定喵 ")
+                    return False
+                if retcode == -3505:
+                    if bot:
+                        await bot.send(event, [At(qq=user_id), " 您已取消扫码喵"])
+                    else:
+                        print(" 您已取消扫码喵")
+                    return False
+                raise _UseLegacyQrLogin
+            if status in ("Created", "Init"):
+                await asyncio.sleep(plugin_config.preference.qrcode_query_interval)
+                continue
+            if status == "Scanned":
+                if not scanned:
+                    logger.info(f"用户 {user_id} 米游社二维码已扫描，等待确认")
+                    scanned = True
+                await asyncio.sleep(plugin_config.preference.qrcode_query_interval)
+                continue
+            if status == "Confirmed":
+                cookie_data = _parse_cookie_string(_collect_set_cookies(response.headers, response.cookies))
+                _add_qr_payload_credentials(cookie_data, payload)
+                bbs_uid = _miyoushe_account_uid(cookie_data)
+                if not bbs_uid:
+                    raise _UseLegacyQrLogin
+
+                cookies_save = _build_bbs_cookies(cookie_data, bbs_uid)
+                # Passport app QR responses normally contain stoken in the
+                # response body.  Upgrade v1 when that is the only token.
+                if not cookies_save.stoken_v2 and cookies_save.stoken_v1:
+                    stoken_status, _ = await get_stoken_v2_by_v1(
+                        cookies_save, device_id=device_id, retry=False
+                    )
+                    if not stoken_status:
+                        raise _UseLegacyQrLogin
+                if not cookies_save.stoken_v2:
+                    raise _UseLegacyQrLogin
+
+                if not (cookies_save.cookie_token or cookies_save.cookie_token_v2):
+                    cookie_status, _ = await get_cookie_token_by_stoken(
+                        cookies_save, device_id=device_id, retry=False
+                    )
+                    if not cookie_status:
+                        raise _UseLegacyQrLogin
+                if cookies_save.stoken_v2 and cookies_save.mid and not (cookies_save.ltoken or cookies_save.ltoken_v2):
+                    await get_ltoken_by_stoken(cookies_save, device_id=device_id, retry=False)
+
+                account = user.accounts.get(bbs_uid)
+                if not account or not account.cookies:
+                    account = UserAccount(
+                        phone_number=None,
+                        cookies=cookies_save,
+                        device_id_ios=device_id,
+                        device_id_android=generate_device_id()
+                    )
+                    user.accounts[bbs_uid] = account
+                else:
+                    _update_bbs_cookies(account.cookies, cookies_save)
+                    account.device_id_ios = device_id
+                    account.device_id_android = account.device_id_android or generate_device_id()
+
+                fp_status, account.device_fp = await get_device_fp(account.device_id_ios or device_id)
+                if fp_status:
+                    logger.info(f"用户 {bbs_uid} 成功获取 device_fp: {account.device_fp}")
+                PluginDataManager.write_plugin_data()
+                await cache_delete(db, 'mihuyo', user_id)
+                logger.info(f"{plugin_config.preference.log_head}米游社账户 {bbs_uid} 绑定成功")
+                if bot:
+                    await bot.send(event, [At(qq=user_id), f" 欢迎，米游社用户： （{bbs_uid}） "])
+                else:
+                    print(f"欢迎，米游社用户： （{bbs_uid}）")
+                return True
+            raise _UseLegacyQrLogin
+
+        if bot:
+            await bot.send(event, [At(qq=user_id), " 等待扫码确认超时，请重新绑定喵"])
+        else:
+            print(" 等待扫码确认超时，请重新绑定喵")
+        return False
+    except _UseLegacyQrLogin:
+        raise
+    except Exception as error:
+        logger.error(f"米游社 App 二维码登录失败，将回退原登录方式：{error}")
+        raise _UseLegacyQrLogin from error
+    finally:
+        if recall_id and bot:
+            await bot.recall(recall_id['data']['message_id'])
+
+
 async def mys_login_new(user_id,bot=None,event=None,config=None):
+    """Use the current Passport app QR login and retain the legacy QR fallback."""
+    await cache_delete(db, 'skland', str(user_id))
+    try:
+        return await _mys_login_app_qr(user_id, bot=bot, event=event, config=config)
+    except _UseLegacyQrLogin:
+        return await _mys_login_new_legacy(user_id, bot=bot, event=event, config=config)
+
+
+async def _mys_login_new_legacy(user_id,bot=None,event=None,config=None):
     recall_id = None
     await cache_delete(db, 'skland', str(user_id))
     user_id = str(user_id)

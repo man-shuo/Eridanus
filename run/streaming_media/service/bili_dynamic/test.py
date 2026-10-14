@@ -9,6 +9,10 @@ from framework_common.manshuo_draw import *
 async def test():
     data_info = await data_init()
     pprint.pprint(data_info['cookies'])
+
+    info = await bili_up_dynamic_monitor_add(3546659575302330,326183226,)
+    pprint.pprint(info)
+
     #await data_delete(7071924)
     # await bili_login()
     # info = await data_init()

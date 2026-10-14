@@ -19,13 +19,28 @@ global Cachecleaner
 Cachecleaner=False
 linking_prising_list = {}
 
+async def _recall_message_if_available(bot, send_result):
+    """仅在消息发送接口返回有效 message_id 时撤回消息。"""
+    if not isinstance(send_result, dict):
+        return
+    data = send_result.get('data')
+    if not isinstance(data, dict):
+        return
+    message_id = data.get('message_id')
+    if message_id is None:
+        return
+    try:
+        await bot.recall(message_id)
+    except Exception as e:
+        bot.logger.warning(f'撤回链接解析提示消息失败: {e}')
+
+
 async def call_bili_download_video(bot, event, config,type_download='video'):
     if event.group_id in teamlist:
         json_linking = teamlist[event.group_id]['data']
         teamlist.pop(event.group_id)
-        if f'{event.group_id}_recall' in teamlist:
-            await bot.recall(teamlist[f'{event.group_id}_recall']['data']['message_id'])
-            teamlist.pop(f'{event.group_id}_recall')
+        recall_result = teamlist.pop(f'{event.group_id}_recall', None)
+        await _recall_message_if_available(bot, recall_result)
     else:
         return {"status": "当前群聊没有已缓存的解析结果。"}
     if json_linking['soft_type'] not in {'bilibili', 'dy', 'wb', 'xhs', 'x'}:
@@ -33,20 +48,23 @@ async def call_bili_download_video(bot, event, config,type_download='video'):
         return
     proxy = config.common_config.basic_config["proxy"]["http_proxy"] if config.streaming_media.config["bili_dynamic"]["use_proxy"] else None
     #proxy=None
-    if type_download == 'video' and json_linking['video_url']:
+    if type_download == 'video':
+        if not json_linking.get('video_url'):
+            await bot.send(event, '下载失败\n视频下载地址为空')
+            return
         try:
             video_json = await download_video_link_prising(json_linking, filepath='data/pictures/cache/', proxy=proxy)
             if 'video' in video_json['type']:
-                if video_json['type'] == 'video_bigger':recall_id = await bot.send(event, f'视频有些大，请耐心等待喵~~')
-                msg_info = await bot.send(event, Video(file=video_json['video_path']))
-                #pprint.pprint(msg_info)
-                # if msg_info.get('status') != 'ok':
-                #     await bot.send(event, File(file=video_json['video_path']))
-                if video_json['type'] == 'video_bigger':await bot.recall(recall_id['data']['message_id'])
+                recall_id = None
+                if video_json['type'] == 'video_bigger':
+                    recall_id = await bot.send(event, f'视频有些大，请耐心等待喵~~')
+                await bot.send(event, Video(file=video_json['video_path']))
+                if video_json['type'] == 'video_bigger':
+                    await _recall_message_if_available(bot, recall_id)
             elif video_json['type'] == 'file':
-                recall_id =await bot.send(event, f'好大的视频，小的将发送至群文件喵~')
+                recall_id = await bot.send(event, f'好大的视频，小的将发送至群文件喵~')
                 await bot.send(event, File(file=video_json['video_path']))
-                await bot.recall(recall_id['data']['message_id'])
+                await _recall_message_if_available(bot, recall_id)
             elif video_json['type'] == 'too_big':
                 await bot.send(event, f'太大了，罢工！')
         except Exception as e:

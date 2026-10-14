@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from framework_common.manshuo_draw import *
 from ..api import BaseGameSign
 from ..api import BaseMission, get_missions_state
-from ..api.common import genshin_note, get_game_record, starrail_note
+from ..api.common import genshin_note, get_game_record, starrail_note, zzz_note
 from ..model import (MissionStatus, PluginDataManager, plugin_config, UserData, CommandUsage, GenshinNoteNotice,
                      StarRailNoteNotice)
 import pprint
@@ -29,8 +29,8 @@ async def mys_note_check(user_id,bot=None,event=None,target='星铁'):
         if target in game_name_list[item]:
             target = item
             break
-    if target not in ['原神','崩坏：星穹铁道']:
-        msg = '当前便签仅支持原神与崩铁查看哦'
+    if target not in ['原神', '崩坏：星穹铁道', '绝区零']:
+        msg = '当前便签仅支持原神、崩铁与绝区零查看哦'
         if bot and event: await bot.send(event, msg)
         else: print(msg)
         return
@@ -39,6 +39,8 @@ async def mys_note_check(user_id,bot=None,event=None,target='星铁'):
             await genshin_note_check(user, user_id, bot=bot, event=event)
         elif target == '崩坏：星穹铁道':
             await starrail_note_check(user, user_id, bot=bot, event=event)
+        elif target == '绝区零':
+            await zzz_note_check(user, user_id, bot=bot, event=event)
 
     except Exception as e:
         print(e)
@@ -122,6 +124,39 @@ async def starrail_note_check(user, user_id, bot = None,event = None):
                    f"\n📅每日委托：{note.accepted_expedition_num} / 4" \
                    f"\n🌌模拟宇宙：{note.current_rogue_score} / {note.max_rogue_score}"
 
+            if bot:
+                await bot.send(event, [At(qq=user_id), msg])
+            else:
+                print(msg)
+
+
+async def zzz_note_check(user, user_id, bot=None, event=None):
+    """查看绝区零实时便签并按现有便签格式发送。"""
+    for account in user.accounts.values():
+        if account.enable_resin and 'ZenlessZoneZero' in account.game_sign_games:
+            zzz_board_status, note = await zzz_note(account)
+            if not zzz_board_status:
+                if zzz_board_status.login_expired:
+                    msg = ' 登录失效，请重新登录'
+                elif zzz_board_status.no_zzz_account:
+                    msg = ' 没有绑定任何绝区零账户，请绑定后再重试'
+                elif zzz_board_status.need_verify:
+                    msg = ' 获取实时便签时被人机验证阻拦'
+                else:
+                    msg = ' 获取实时便签请求失败，请稍后重试'
+                if bot: await bot.send(event, msg)
+                else: print(msg)
+                continue
+
+            msg = "  \n❖绝区零·实时便签❖" \
+                  f"\n🆔账户 {account.display_name}" \
+                  f"\n⏳电量数量：{note.current_energy} / {note.max_energy}" \
+                  f"\n⏱电量{note.energy_recover_text}" \
+                  f"\n📒今日活跃度：{note.current_vitality} / {note.max_vitality}" \
+                  f"\n🎰刮刮卡：{note.card_sign_text}" \
+                  f"\n🏪录像店经营：{note.vhs_sale_text}" \
+                  f"\n🎯悬赏委托：{note.bounty_num} / {note.bounty_total}" \
+                  f"\n📅丽都周纪：{note.weekly_num} / {note.weekly_total}"
             if bot:
                 await bot.send(event, [At(qq=user_id), msg])
             else:

@@ -1,134 +1,138 @@
-import httpx
-import re
 import copy
-import asyncio
-from .login_core import ini_login_Link_Prising
-from .common import json_init,filepath_init,COMMON_HEADER,GLOBAL_NICKNAME,GENERAL_REQ_LINK,no_draw_type
-from urllib.parse import urlparse
-from urllib.parse import parse_qs
-from datetime import datetime, timedelta
-from developTools.utils.logger import get_logger
-logger=get_logger()
-import json
-from framework_common.manshuo_draw.manshuo_draw import manshuo_draw
+import re
+
+import httpx
+from bs4 import BeautifulSoup
 from httpx import AsyncClient
-import pprint
-from framework_common.utils.utils import download_img
-from framework_common.utils.random_str import random_str
-from playwright.async_api import async_playwright
-from run.resource_collector.service.engine_search import html_read
 
-async def twitter(url,filepath=None,proxy=None,type_check=None):
-    """
-        X解析
-    :param bot:
-    :param event:
-    :return:
-    """
-    msg=url
-    contents=[]
+from .common import COMMON_HEADER, filepath_init, json_init, no_draw_type
+from developTools.utils.logger import get_logger
+from framework_common.manshuo_draw.manshuo_draw import manshuo_draw
+
+
+logger = get_logger()
+
+
+def _twitter_quality_value(label):
+    match = re.search(r"(\d+)\s*p", str(label or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def _twitter_media_options(html_text):
+    """Extract the post title, preview image, and available video variants."""
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    title_node = soup.find("h3")
+    title = title_node.get_text(" ", strip=True) if title_node else ""
+
+    image_node = soup.find("img", src=True)
+    image_url = image_node.get("src", "").strip() if image_node else ""
+
+    video_options = []
+    seen = set()
+    for link in soup.select("a[href]"):
+        href = link.get("href", "").strip()
+        label = link.get_text(" ", strip=True)
+        if not href.startswith(("http://", "https://")) or "mp4" not in label.lower():
+            continue
+        quality_match = re.search(r"\(([^)]+)\)", label)
+        quality = quality_match.group(1).strip() if quality_match else label
+        if href in seen:
+            continue
+        seen.add(href)
+        video_options.append({
+            "url": href,
+            "label": label,
+            "quality": quality,
+        })
+
+    video_options.sort(
+        key=lambda item: _twitter_quality_value(item["quality"]),
+        reverse=True,
+    )
+    return title, image_url, video_options
+
+
+async def twitter(url, filepath=None, proxy=None, type_check=None):
+    """Parse an X post through xdown.app and optionally render its preview."""
     json_check = copy.deepcopy(json_init)
-    json_check['soft_type'] = 'x'
-    json_check['status'] = True
-    json_check['video_url'] = False
-    if filepath is None: filepath = filepath_init
-    x_url = re.search(r"https?:\/\/x.com\/[0-9-a-zA-Z_]{1,20}\/status\/([0-9]*)", msg)[0]
+    json_check["soft_type"] = "x"
+    json_check["status"] = True
+    json_check["video_url"] = False
+    if filepath is None:
+        filepath = filepath_init
 
-    #x_url = GENERAL_REQ_LINK.replace("{}", x_url)
+    x_match = re.search(
+        r"https?://x\.com/([0-9a-zA-Z_]{1,20})/status/(\d+)",
+        str(url),
+    )
+    if not x_match:
+        json_check["status"] = False
+        json_check["reason"] = "未找到有效的 X 帖子链接"
+        return json_check
 
+    x_url = x_match[0]
+    json_check["url"] = x_url
+    json_check["user_name"] = f"@{x_match.group(1)}"
 
-
-
-
-
-
-    # 内联一个请求
-    async def x_req(x_url):
+    async def x_req(post_url):
         headers = {
             "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/x-www-form-urlencoded",
             "Origin": "https://xdown.app",
             "Referer": "https://xdown.app/",
+            "User-Agent": COMMON_HEADER.get("User-Agent", ""),
         }
-        data = {"q": x_url, "lang": "zh-cn"}
-        async with AsyncClient(headers=headers) as client:
-            url = "https://xdown.app/api/ajaxSearch"
-            response = await client.post(url, data=data)
+        client_options = {
+            "headers": headers,
+            "timeout": httpx.Timeout(30.0, connect=15.0),
+            "follow_redirects": True,
+        }
+        # The project currently pins httpx<0.28, whose proxy option is
+        # named ``proxies``.
+        if proxy:
+            client_options["proxies"] = proxy
+        async with AsyncClient(**client_options) as client:
+            response = await client.post(
+                "https://xdown.app/api/ajaxSearch",
+                data={"q": post_url, "lang": "zh-cn"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {}
 
-            return response.json()
+    rsq_data = await x_req(x_url)
+    response_html = rsq_data.get("data") or ""
+    title, img_url, video_options = _twitter_media_options(response_html)
 
-    rsq_data = (await x_req(x_url))
-    #pprint.pprint(rsq_data)
-    match = re.search(r'src="([^"]+)"', rsq_data['data'])
-    if match:
-        img_url = match.group(1)
-        json_check['pic_url_list'] = [img_url]
-        if type_check not in no_draw_type:
-            return json_check
-    else:
-        return json_check
-    #print(img_url)
-
-    match = re.search(r'href="([^"]+)"', rsq_data['data'])
-    if match:
-        video_url = match.group(1)
-        match = re.search(r'data-audioUrl="([^"]+)"', rsq_data['data'])
-        if match:
-            audio_url = match.group(1)
-            json_check['audio_url'] = audio_url
-            json_check['video_url'] = video_url
-
-
-
-    logger.info(img_url)
-    img_path = "data/pictures/cache/" + random_str() + ".png"
-    await download_img(img_url, img_path, proxy="http://127.0.0.1:7890" )
-
-    #使用浏览器获取文本
-    title = ''
-    match = re.search(r'<h3>(.*?)</h3>', rsq_data['data'])
-    if match:
-        title = f'[title]{match.group(1)}[/title]'
-    else:
-        try:
-            async with async_playwright() as p:
-                # 启动浏览器
-                browser = await p.chromium.launch(headless=True, proxy={"server":"http://127.0.0.1:7890"})
-                page = await browser.new_page()
-                await page.route("**/*", lambda route, request: asyncio.create_task(
-                    route.abort() if request.resource_type in ["image", "stylesheet", "font"] else route.continue_()
-                ))
-                # 访问网页
-                await page.goto(x_url)
-
-                # 获取网页body中的纯文本内容
-                body_handle = await page.query_selector("body")
-                text_content = await body_handle.inner_text()
-                #print(text_content)
-                await browser.close()
-                text_content = text_content.split("\n")
-                #print(text_content)
-                num,X_id,X_name,X_content = 0,None,None,None
-                for item in text_content:
-                    if item.startswith('@'):
-                        X_id = text_content[num]
-                        X_name = text_content[num - 1]
-                        break
-                    num += 1
-                if X_id is not None:
-                    content_num = 0
-                    for item in text_content:
-                        if item.strip() == '·' or item.strip() == 'Views':
-                            break
-                        content_num += 1
-                    X_content = "\n".join(text_content[num+1:content_num])
-                #print(X_id,X_name,X_content)
-                if X_id is not None:
-                    title = f'[title]{X_name} [/title]{X_id}\n{X_content}'
-        except:pass
     if title:
-        contents = [title,img_path]
-    else:
-        contents = [img_path]
-    json_check['pic_path'] = await manshuo_draw(contents)
+        json_check["title"] = title
+        json_check["content"] = {"text": title, "type": "post"}
+    if img_url:
+        json_check["pic_url_list"] = [img_url]
+    if video_options:
+        #json_check["video_options"] = video_options
+        json_check["video_url"] = video_options[0]['url']
+
+    if type_check not in no_draw_type:
+        draw_proxy = proxy or "http://127.0.0.1:20172"
+        draw_json = [
+            {"type": "basic_set", "proxy": draw_proxy},
+            {"type": "backdrop", "subtype": "one_color"},
+        ]
+        if img_url:
+            draw_json.append({
+                "type": "avatar",
+                "subtype": "common",
+                "img": [img_url],
+                "upshift_extra": 20,
+                "content": [
+                    f"[name]{json_check.get('user_name', '')}[/name]\n"
+                    f"[time]{json_check['url']}[/time]"
+                ],
+            })
+        if json_check["pic_url_list"]:
+            draw_json.append(json_check["pic_url_list"])
+        draw_json.append([json_check.get("title") or "X 帖子"])
+        json_check["pic_path"] = await manshuo_draw(draw_json)
+
     return json_check

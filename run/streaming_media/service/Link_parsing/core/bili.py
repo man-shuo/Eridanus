@@ -129,8 +129,11 @@ async def download_b_file(url, full_file_name, progress_callback=None,proxy=None
             'Safari/537.36',
         'referer': 'https://www.bilibili.com',
     }
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("B站视频或音频下载地址为空")
     async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0"),proxy=proxy) as client:
         async with client.stream("GET", url, headers=BILIBILI_HEADER, timeout=60) as resp:
+            resp.raise_for_status()
             current_len = 0
             total_len = int(resp.headers.get('content-length', 0))
             #print(total_len)
@@ -141,6 +144,7 @@ async def download_b_file(url, full_file_name, progress_callback=None,proxy=None
                     #print(f'{current_len} bytes downloaded')
                     #print(f'下载进度：{round(current_len / total_len, 3)}')
                     #progress_callback(f'下载进度：{round(current_len / total_len, 3)}')
+    return full_file_name
 
 def download_and_process_image(image_url, save_path):
     """
@@ -221,7 +225,7 @@ async def merge_file_to_mp4(v_full_file_name: str, a_full_file_name: str, output
     if platform.system() == "Windows":
         # Windows 下使用 run_in_executor
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
+        return_code = await loop.run_in_executor(
             None,
             lambda: subprocess.call(command, shell=True, stdout=stdout, stderr=stderr)
         )
@@ -234,6 +238,11 @@ async def merge_file_to_mp4(v_full_file_name: str, a_full_file_name: str, output
             stderr=stderr
         )
         await process.communicate()
+        return_code = process.returncode
+    if return_code != 0:
+        raise RuntimeError(f"ffmpeg 合并失败，退出码: {return_code}")
+    if not file_exists_and_nonzero(output_file_name):
+        raise FileNotFoundError(f"ffmpeg 未生成有效视频文件: {output_file_name}")
 
 def extra_bili_info(video_info):
     """
@@ -307,11 +316,21 @@ async def fetch_latest_dynamic_id_api(uid):
 
 async def download_b(video_url,audio_url,video_id,filepath=None,proxy=None):
     if video_id is None or not video_id:video_id='default'
+    if not isinstance(video_url, str) or not video_url.strip():
+        raise ValueError("B站视频下载地址为空")
+    if filepath is None:
+        raise ValueError("视频保存路径不能为空")
+    os.makedirs(filepath, exist_ok=True)
     path = filepath  + str(video_id)
     #print('start video downloading')
-    await asyncio.gather(
-        download_b_file(video_url, f"{path}-video.m4s",proxy=proxy),
-        download_b_file(audio_url, f"{path}-audio.m4s",proxy=proxy))
+    download_tasks = [
+        download_b_file(video_url, f"{path}-video.m4s",proxy=proxy)
+    ]
+    if isinstance(audio_url, str) and audio_url.strip():
+        download_tasks.append(
+            download_b_file(audio_url, f"{path}-audio.m4s",proxy=proxy)
+        )
+    await asyncio.gather(*download_tasks)
     await merge_file_to_mp4(f"{path}-video.m4s", f"{path}-audio.m4s", f"{path}-res.mp4")
     return f"{path}-res.mp4"
 
