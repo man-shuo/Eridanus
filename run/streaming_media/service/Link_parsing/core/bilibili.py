@@ -1,6 +1,7 @@
 import httpx
 import re
 import copy
+import os
 from .login_core import ini_login_Link_Prising
 from .common import json_init,filepath_init,COMMON_HEADER,GLOBAL_NICKNAME,no_draw_type
 from urllib.parse import urlparse
@@ -41,12 +42,12 @@ if sys.platform == 'win32':
 
 
 async def get_dominant_color(img_url,absorb_color=False, k=4, image_resize=(100, 100)):
+    return_json = {'back_rgb': (194, 228, 255), 'layer_rgba': (235, 239, 253),
+                   'font_title_rgb': (0, 0, 0), 'font_des_rgb': (148, 148, 148),
+                   'img_des_rgba': (255, 255, 255, 255), 'avatar_shadow_color': (0, 0, 0),
+                   'avatar_shadow_max_alpha': 120, 'avatar_shadow_intensity': 1,
+                   'label_color': (251, 114, 153, 255)}
     if absorb_color is False or img_url is None:
-        return_json = {'back_rgb': (194, 228, 255), 'layer_rgba': (235, 239, 253),
-                       'font_title_rgb': (0,0,0), 'font_des_rgb': (148,148,148),
-                       'img_des_rgba':(255, 255, 255, 255),'avatar_shadow_color':(0, 0, 0),
-                       'avatar_shadow_max_alpha':120, 'avatar_shadow_intensity': 1,
-                       'label_color':(251,114,153,255)}
         return return_json
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(img_url)
@@ -75,6 +76,9 @@ async def get_dominant_color(img_url,absorb_color=False, k=4, image_resize=(100,
     WHITE = np.array([255, 255, 255])
 
     weights = []
+    #print(len(counts),k)
+    if len(counts) < k:
+        return return_json
     for i in range(k):
         color = cluster_centers[i]
         r, g, b = color / 255
@@ -550,20 +554,30 @@ async def bilibili(url,filepath=None,is_twice=None,type=None,credential_bili=Non
 
 async def download_video_link_prising(json,filepath=None,proxy=None):
     if filepath is None:filepath = filepath_init
+    if not isinstance(json, dict):
+        raise TypeError("解析结果必须是字典")
     video_json={}
-    if json['soft_type'] == 'bilibili':
-        video_path=await download_b(json['video_url'], json['audio_url'], int(time.time()), filepath=filepath)
-    elif json['soft_type'] == 'dy':
-        video_path = await download_video(json['video_url'], filepath=filepath)
-    elif json['soft_type'] == 'wb':
-        video_path = await download_video(json['video_url'], filepath=filepath, ext_headers={
+    video_url = json.get('video_url')
+    audio_url = json.get('audio_url')
+    if not isinstance(video_url, str) or not video_url.strip():
+        raise ValueError("视频下载地址为空")
+    if json.get('soft_type') == 'bilibili':
+        video_path=await download_b(video_url, audio_url, int(time.time()), filepath=filepath, proxy=proxy)
+    elif json.get('soft_type') == 'dy':
+        video_path = await download_video(video_url, proxy=proxy, filepath=filepath)
+    elif json.get('soft_type') == 'wb':
+        video_path = await download_video(video_url, proxy=proxy, filepath=filepath, ext_headers={
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
                 "referer": "https://weibo.com/"
             })
-    elif json['soft_type'] == 'x':
-        video_path = await download_b(json['video_url'], json['audio_url'], int(time.time()),filepath=filepath,proxy=proxy)
-    elif json['soft_type'] == 'xhs':
-        video_path = await download_video(json['video_url'], filepath=filepath)
+    elif json.get('soft_type') == 'x':
+        video_path = await download_b(video_url, audio_url, int(time.time()),filepath=filepath,proxy=proxy)
+    elif json.get('soft_type') == 'xhs':
+        video_path = await download_video(video_url, proxy=proxy, filepath=filepath)
+    else:
+        raise ValueError(f"不支持的视频类型: {json.get('soft_type')}")
+    if not video_path or not os.path.isfile(video_path) or os.path.getsize(video_path) <= 0:
+        raise FileNotFoundError(f"视频下载未生成有效文件: {video_path!r}")
     video_json['video_path'] = video_path
     file_size_in_mb = get_file_size_mb(video_path)
     if file_size_in_mb < 25:
