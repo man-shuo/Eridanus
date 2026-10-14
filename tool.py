@@ -16,11 +16,38 @@ from framework_common.utils.install_and_import import install_and_import, get_py
 logger = get_logger()
 
 parent_dir = os.path.dirname(os.getcwd())
-custom_git_path = os.path.join(parent_dir, "environments", "MinGit", "cmd", "git.exe")
-if os.path.exists(custom_git_path):
-    git_path = custom_git_path
-else:
-    git_path = "git"
+
+
+def get_git_path(base_dir: str = None) -> str:
+    """获取 git 可执行文件的路径，优先检查部署环境中的 MinGit，确保未设置环境变量的系统也能正常调用"""
+    repo_dir = os.path.abspath(base_dir) if base_dir else os.path.dirname(os.path.abspath(__file__))
+    p_dir = os.path.dirname(repo_dir)
+
+    # 1. 检查一键整合包常见结构：上级目录中的 environments/MinGit/cmd/git.exe
+    candidate_parent = os.path.join(p_dir, "environments", "MinGit", "cmd", "git.exe")
+    if os.path.exists(candidate_parent):
+        return candidate_parent
+
+    # 2. 检查当前目录下 environments/MinGit/cmd/git.exe
+    candidate_local = os.path.join(repo_dir, "environments", "MinGit", "cmd", "git.exe")
+    if os.path.exists(candidate_local):
+        return candidate_local
+
+    # 3. 检查当前工作目录的父目录（兼容不同启动工作路径）
+    cwd_parent = os.path.dirname(os.getcwd())
+    candidate_cwd_parent = os.path.join(cwd_parent, "environments", "MinGit", "cmd", "git.exe")
+    if os.path.exists(candidate_cwd_parent):
+        return candidate_cwd_parent
+
+    # 4. 检查系统环境变量中是否有 git
+    which_git = shutil.which("git")
+    if which_git:
+        return which_git
+
+    return "git"
+
+
+git_path = get_git_path()
 
 custom_python_path = os.path.join(parent_dir, "environments", "Python311", "python.exe")
 python_path = sys.executable
@@ -343,171 +370,177 @@ def ai_solve_git_update(source_url: str, initial_stdout: str, initial_stderr: st
         return False, f"AI 初始化失败: {e}"
 
     backed_up_yamls = {}
-    history = []
+    success = False
+    default_repo_url = source_url
+
+    def clean_conflicts(file_paths: list = None, **kwargs) -> str:
+        if not file_paths:
+            return "错误: 未提供要清理的文件列表"
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+        cleaned = []
+        for fp in file_paths:
+            if clean_and_backup_file(fp, backed_up_yamls):
+                cleaned.append(fp)
+        logger.info(f"AI 执行 clean_conflicts，已处理文件: {cleaned}")
+        return f"已成功处理并备份/清理冲突文件: {cleaned}"
+
+    def git_pull(source_url: str = "", **kwargs) -> str:
+        nonlocal success
+        target_url = source_url or default_repo_url
+        logger.info(f"AI 正在执行 git_pull: {target_url}")
+        code, out, err = run_git_command(["pull", target_url])
+        if is_git_pull_success(code, out, err):
+            success = True
+            logger.info("AI 执行 git_pull 成功！")
+            return f"Pull 成功！已拉取最新代码。\nSTDOUT: {out}\nSTDERR: {err}"
+        else:
+            logger.warning(f"AI 执行 git_pull 未成功: {err or out}")
+            return f"Pull 仍有错误或未完成。\nReturncode: {code}\nSTDOUT: {out}\nSTDERR: {err}"
+
+    def git_status(**kwargs) -> str:
+        logger.info("AI 正在执行 git_status")
+        code, out, err = run_git_command(["status"])
+        return f"Git Status:\n{out}\n{err}"
+
+    def git_abort_merge(**kwargs) -> str:
+        logger.info("AI 正在执行 git_abort_merge")
+        code, out, err = run_git_command(["merge", "--abort"])
+        return f"Git merge --abort 执行完成: {out} {err}"
+
+    def git_checkout_file(file_paths: list = None, **kwargs) -> str:
+        if not file_paths:
+            return "错误: 未提供要还原的文件列表"
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+        logger.info(f"AI 正在执行 git_checkout_file: {file_paths}")
+        code, out, err = run_git_command(["checkout", "--"] + file_paths)
+        return f"Checkout 结果:\nSTDOUT: {out}\nSTDERR: {err}"
+
+    tools_map = {
+        "clean_conflicts": {
+            "func": clean_conflicts,
+            "declaration": {
+                "name": "clean_conflicts",
+                "description": "清理导致 Git 冲突的文件或目录。对于 yaml/yml 配置文件会自动备份以便后续合并配置，对于其他资源或代码文件会直接移除以允许 pull。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "要清理的冲突文件或目录相对路径列表，例如 ['run/character_detection/config.yaml']"
+                        }
+                    },
+                    "required": ["file_paths"]
+                }
+            }
+        },
+        "git_pull": {
+            "func": git_pull,
+            "declaration": {
+                "name": "git_pull",
+                "description": "执行 git pull 操作从远程仓库拉取最新代码。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source_url": {
+                            "type": "string",
+                            "description": "Git 远程仓库地址（可选，留空则使用当前配置的仓库源）"
+                        }
+                    },
+                    "required": []
+                }
+            }
+        },
+        "git_status": {
+            "func": git_status,
+            "declaration": {
+                "name": "git_status",
+                "description": "查看当前的 git status 输出，确认当前工作区状态与冲突文件。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        "git_abort_merge": {
+            "func": git_abort_merge,
+            "declaration": {
+                "name": "git_abort_merge",
+                "description": "如果处于未完成的冲突 merge 状态，执行 git merge --abort 回滚合并状态。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        "git_checkout_file": {
+            "func": git_checkout_file,
+            "declaration": {
+                "name": "git_checkout_file",
+                "description": "放弃某些本地未提交文件的更改，将其还原为 HEAD 版本。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "要放弃修改并还原的文件路径列表"
+                        }
+                    },
+                    "required": ["file_paths"]
+                }
+            }
+        }
+    }
 
     system_prompt = (
         "你是一个专业的 Git 诊断与自动化更新解决助手。当前用户正在更新开源项目，但遇到了 Git 冲突或错误。\n"
         "请记住：用户是技术小白，你需要全自动调用工具解决问题，直至成功 pull 到最新代码。\n"
         "规则：\n"
-        "1. 遇到 gif, png, jpg, txt, py 等非 yaml 资源或代码冲突，调用 clean_conflicts 直接删除它们，以便顺利更新。\n"
-        "2. 遇到 yaml, yml 配置文件，必须调用 clean_conflicts（系统会自动将其备份并在更新后进行安全合并，绝不丢失配置）。\n"
-        "3. 在清理冲突文件后，必须再次调用 git_pull 尝试拉取。\n"
-        "4. 如果更新已经是最新 (already up to date) 或更新成功，向用户汇报已成功。\n"
-        "5. 最多进行 5 轮交互，不要死循环。"
+        "1. 仔细阅读报错信息中冲突的文件列表。\n"
+        "2. 遇到 yaml, yml 配置文件冲突，必须调用 clean_conflicts（系统会自动安全备份，并在成功拉取后自动智能合并用户配置，绝不丢失配置）。\n"
+        "3. 遇到 gif, png, jpg, txt, py 等非 yaml 资源或代码冲突，调用 clean_conflicts 直接清理它们以排除阻碍。\n"
+        "4. 在清理完冲突文件后，必须调用 git_pull 重新尝试拉取代码。\n"
+        "5. 如果 pull 成功或已经是最新代码 (already up to date)，向用户简要汇报拉取结果，无需再调用工具。\n"
+        "6. 不要陷入死循环，目标是确保代码成功拉取完毕。"
     )
 
-    tools_schema = [
-        {
-            "name": "clean_conflicts",
-            "description": "清理导致 Git 冲突的文件或目录。对于 yaml 文件会自动备份以便后续合并，对于 gif/png/txt/py 等文件会直接移除以允许 pull。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "要清理的冲突文件或目录相对路径列表，例如 ['run/test.gif', 'config.yaml']"
-                    }
-                },
-                "required": ["file_paths"]
-            }
-        },
-        {
-            "name": "git_pull",
-            "description": "执行 git pull 操作从指定源拉取最新代码。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "source_url": {
-                        "type": "string",
-                        "description": "Git 远程仓库地址"
-                    }
-                }
-            }
-        },
-        {
-            "name": "git_status",
-            "description": "查看当前的 git status 输出。",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        },
-        {
-            "name": "git_abort_merge",
-            "description": "如果处于冲突的 merge 状态，执行 git merge --abort 回滚合并状态。",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        },
-        {
-            "name": "git_checkout_file",
-            "description": "放弃某些本地未提交文件的更改，将其还原为 HEAD 版本。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "要还原的文件路径列表"
-                    }
-                },
-                "required": ["file_paths"]
-            }
-        }
-    ]
-
     initial_log = f"Git pull 输出日志：\nSTDOUT:\n{initial_stdout}\nSTDERR:\n{initial_stderr}\n当前更新源 URL: {source_url}"
-    history.append({"role": "user", "content": initial_log})
+    messages = [{"role": "user", "content": initial_log}]
 
-    success = False
+    async def on_intermediate_text(text: str):
+        if text and text.strip():
+            logger.info(f"AI 提示: {text.strip()}")
+
+    async def _run_ai():
+        return await client.chat(
+            messages=messages,
+            system_prompt=system_prompt,
+            tools=tools_map,
+            on_intermediate_text=on_intermediate_text
+        )
+
+    logger.info("AI 正在分析并执行自动修复与拉取方案...")
     detail = ""
+    try:
+        reply = asyncio.run(_run_ai())
+        detail = reply or ""
+        if detail:
+            logger.info(f"AI 总结: {detail}")
+    except Exception as e:
+        logger.error(f"AI 诊断请求异常: {e}")
+        detail = str(e)
 
-    for step in range(5):
-        logger.info(f"AI 正在思考诊断方案（第 {step + 1} 轮）...")
-        try:
-            resp = asyncio.run(client.chat(
-                history=history,
-                system_prompt=system_prompt,
-                tools=tools_schema
-            ))
-        except Exception as e:
-            logger.error(f"AI 诊断请求异常: {e}")
-            break
-
-        tool_calls = resp.tool_calls or []
-        content = resp.content or ""
-        if content:
-            logger.info(f"AI 提示: {content}")
-
-        history.append({
-            "role": "assistant",
-            "content": content,
-            "tool_calls": tool_calls
-        })
-
-        if not tool_calls:
-            detail = content
-            break
-
-        for tc in tool_calls:
-            tname = tc.get("function", {}).get("name") or tc.get("name")
-            targs = tc.get("function", {}).get("arguments") or tc.get("args") or {}
-            if isinstance(targs, str):
-                import json
-                try:
-                    targs = json.loads(targs)
-                except Exception:
-                    targs = {}
-
-            call_id = tc.get("id", f"call_{tname}_{step}")
-            logger.info(f"AI 执行工具调用: {tname}({targs})")
-
-            tool_result = ""
-            if tname == "clean_conflicts":
-                fps = targs.get("file_paths", [])
-                cleaned = []
-                for fp in fps:
-                    if clean_and_backup_file(fp, backed_up_yamls):
-                        cleaned.append(fp)
-                tool_result = f"已清理文件: {cleaned}"
-
-            elif tname == "git_pull":
-                target_url = targs.get("source_url") or source_url
-                code, out, err = run_git_command(["pull", target_url])
-                if is_git_pull_success(code, out, err):
-                    success = True
-                    tool_result = f"Pull 成功！\nSTDOUT: {out}\nSTDERR: {err}"
-                else:
-                    tool_result = f"Pull 仍有错误或未完成。\nReturncode: {code}\nSTDOUT: {out}\nSTDERR: {err}"
-
-            elif tname == "git_status":
-                code, out, err = run_git_command(["status"])
-                tool_result = f"Git Status:\n{out}\n{err}"
-
-            elif tname == "git_abort_merge":
-                code, out, err = run_git_command(["merge", "--abort"])
-                tool_result = f"Git merge --abort 执行完成: {out} {err}"
-
-            elif tname == "git_checkout_file":
-                fps = targs.get("file_paths", [])
-                code, out, err = run_git_command(["checkout", "--"] + fps)
-                tool_result = f"Checkout 结果: {out} {err}"
-            else:
-                tool_result = f"未知工具: {tname}"
-
-            history.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": str(tool_result)
-            })
-
-            if success:
-                break
-
-        if success:
-            break
+    if not success and backed_up_yamls:
+        # AI 处理若清理了文件但未及时调用 git_pull，补做一次 pull 校验
+        code, out, err = run_git_command(["pull", default_repo_url])
+        if is_git_pull_success(code, out, err):
+            success = True
+            logger.info("补充执行 git_pull 成功！")
 
     restore_or_merge_yamls(backed_up_yamls, pull_succeeded=success)
     return success, detail

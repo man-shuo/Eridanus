@@ -2,6 +2,7 @@ import asyncio
 import json
 from developTools.utils.logger import get_logger
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
@@ -9,8 +10,57 @@ from typing import Dict, Any, Optional, Tuple
 logger = get_logger("GitUpdateNotifier")
 
 
+def get_git_executable(repo_root: Optional[Path] = None) -> str:
+    """获取 git 可执行文件的路径，优先复用 tool.py 的解析结果或检索 environments/MinGit"""
+    if repo_root is None:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+    else:
+        repo_root = Path(repo_root)
+
+    # 1. 优先尝试从 tool.py 导入获取
+    try:
+        from tool import get_git_path, git_path
+        if callable(get_git_path):
+            res = get_git_path(str(repo_root))
+        else:
+            res = git_path
+        if res and res != "git" and os.path.exists(res):
+            return res
+        if res and shutil.which(res):
+            return res
+    except Exception as e:
+        logger.debug(f"[GitService] 从 tool.py 获取 git 路径异常: {e}")
+
+    # 2. 检查父目录 environments/MinGit/cmd/git.exe（一键整合包标准结构）
+    candidate_parent = repo_root.parent / "environments" / "MinGit" / "cmd" / "git.exe"
+    if candidate_parent.exists():
+        return str(candidate_parent)
+
+    # 3. 检查仓库根目录下 environments/MinGit/cmd/git.exe
+    candidate_local = repo_root / "environments" / "MinGit" / "cmd" / "git.exe"
+    if candidate_local.exists():
+        return str(candidate_local)
+
+    # 4. 检查当前工作目录的父目录
+    cwd_parent = Path(os.getcwd()).parent / "environments" / "MinGit" / "cmd" / "git.exe"
+    if cwd_parent.exists():
+        return str(cwd_parent)
+
+    # 5. 检查系统环境变量中的 git
+    which_git = shutil.which("git")
+    if which_git:
+        return which_git
+
+    return "git"
+
+
 class GitService:
-    def __init__(self, repo_root: Optional[Path] = None, data_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        repo_root: Optional[Path] = None,
+        data_dir: Optional[Path] = None,
+        git_path: Optional[str] = None,
+    ):
         if repo_root is None:
             self.repo_root = Path(__file__).resolve().parent.parent.parent
         else:
@@ -24,10 +74,19 @@ class GitService:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.data_dir / "git_update_state.json"
 
+        self.git_path = git_path or get_git_executable(self.repo_root)
+        logger.info(f"[GitService] 初始化完成，使用 Git 路径: {self.git_path}")
+
+    def is_git_available(self) -> bool:
+        """检查当前指定的 Git 可执行文件是否真实可用"""
+        if self.git_path != "git":
+            return os.path.exists(self.git_path)
+        return shutil.which("git") is not None
+
     def _run_git_sync(self, args: list[str], timeout: int = 30) -> Tuple[int, str, str]:
         try:
             res = subprocess.run(
-                ["git"] + args,
+                [self.git_path] + args,
                 cwd=str(self.repo_root),
                 capture_output=True,
                 text=True,
@@ -37,7 +96,13 @@ class GitService:
             )
             return res.returncode, res.stdout.strip(), res.stderr.strip()
         except subprocess.TimeoutExpired:
-            return -1, "", f"Git 命令超时（{timeout}秒）: git {' '.join(args)}"
+            return -1, "", f"Git 命令超时（{timeout}秒）: {self.git_path} {' '.join(args)}"
+        except FileNotFoundError:
+            return -1, "", (
+                f"未找到 Git 可执行程序（尝试路径: {self.git_path}）。"
+                f"用户部署环境中未将 Git 加入系统环境变量，且未在 environments/MinGit/cmd/git.exe 检测到内置 MinGit。"
+                f"请确保安装了 Git 或将 MinGit 解压部署至 environments 目录。"
+            )
         except Exception as e:
             return -1, "", str(e)
 
@@ -68,7 +133,27 @@ class GitService:
             c2, o2, e2 = await self.run_git(["fetch", remote], timeout=timeout)
             if c2 == 0:
                 return True, o2
-            return False, f"{err}\n{e2}".strip()
+
+            # 如果使用 origin 且失败，尝试读取配置中的 git_update_source 备选源拉取
+            fallback_err = (err + "\n" + e2).strip()
+            if remote == "origin":
+                try:
+                    from framework_common.framework_util.yamlLoader import YAMLManager
+                    from tool import SOURCES
+                    ym = YAMLManager.get_instance()
+                    source_idx = int(ym.common_config.basic_config.get("git_update_source", 0))
+                    if 0 <= source_idx < len(SOURCES):
+                        fallback_url = SOURCES[source_idx]
+                        if fallback_url != "origin":
+                            logger.info(f"[GitService] 尝试使用配置的备选更新源进行拉取检查: {fallback_url}")
+                            c3, o3, e3 = await self.run_git(["fetch", fallback_url, branch], timeout=timeout)
+                            if c3 == 0:
+                                return True, o3
+                            fallback_err += f"\n备选源拉取失败: {e3}"
+                except Exception as ex:
+                    logger.debug(f"[GitService] 尝试备选更新源失败: {ex}")
+
+            return False, fallback_err
 
     async def check_updates(
         self,
@@ -80,6 +165,23 @@ class GitService:
         target_branch = branch
         if target_branch == "auto" or not target_branch:
             target_branch = await self.get_current_branch()
+
+        if not self.is_git_available():
+            err_msg = (
+                f"未检测到可用的 Git 程序（当前指定路径: {self.git_path}）。"
+                f"当前部署环境中未设置 Git 环境变量，且未在 environments/MinGit/cmd/git.exe 找到内置 MinGit。"
+            )
+            logger.error(f"[GitService] {err_msg}")
+            return {
+                "success": False,
+                "error": err_msg,
+                "is_ahead": False,
+                "ahead_count": 0,
+                "local_commit": "",
+                "remote_commit": "",
+                "branch": target_branch,
+                "remote": remote,
+            }
 
         local_commit = await self.get_local_commit()
 

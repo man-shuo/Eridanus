@@ -102,11 +102,17 @@ def get_ydl_base_opts():
     if cookie_file:
         opts["cookiefile"] = cookie_file
         logger.info(f"已加载 YouTube Cookie 文件: {cookie_file}")
+        # 带 Cookie 时避免使用 tv/tv_downgraded 导致 'The page needs to be reloaded'，优先 web_embedded 与 web
+        opts["extractor_args"] = {
+            "youtube": {
+                "player_client": ["web_embedded", "web"]
+            }
+        }
     else:
         # 未配置 Cookie 时，优先尝试免登录风控较低的客户端
         opts["extractor_args"] = {
             "youtube": {
-                "player_client": ["visionos", "android", "ios", "web"]
+                "player_client": ["web_embedded", "web", "android"]
             }
         }
 

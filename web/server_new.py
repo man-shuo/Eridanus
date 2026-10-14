@@ -56,11 +56,19 @@ logger = get_logger(blocked_loggers=["DEBUG", "INFO_MSG"])
 CORS(app, supports_credentials=True)  # 启用跨域支持
 sock = Sock(app)  # 初始化Flask sock
 
-custom_git_path = os.path.join("environments", "MinGit", "cmd", "git.exe")
-if os.path.exists(custom_git_path):
-    git_path = custom_git_path
-else:
-    git_path = "git"
+try:
+    from tool import get_git_path
+    git_path = get_git_path()
+except Exception:
+    parent_dir = os.path.dirname(os.getcwd())
+    candidate_parent = os.path.join(parent_dir, "environments", "MinGit", "cmd", "git.exe")
+    candidate_local = os.path.join("environments", "MinGit", "cmd", "git.exe")
+    if os.path.exists(candidate_parent):
+        git_path = candidate_parent
+    elif os.path.exists(candidate_local):
+        git_path = candidate_local
+    else:
+        git_path = "git"
 
 logger.info(f"Git path: {git_path}")
 
