@@ -110,8 +110,8 @@ async def twitter(url, filepath=None, proxy=None, type_check=None):
     if img_url:
         json_check["pic_url_list"] = [img_url]
     if video_options:
-        json_check["video_options"] = video_options
-        json_check["video_url"] = [item["url"] for item in video_options]
+        #json_check["video_options"] = video_options
+        json_check["video_url"] = video_options[0]['url']
 
     if type_check not in no_draw_type:
         draw_proxy = proxy or "http://127.0.0.1:20172"
