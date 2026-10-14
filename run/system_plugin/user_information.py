@@ -8,7 +8,7 @@ from developTools.message.message_components import Node, Text, Image, At
 from framework_common.database_util.User import add_user, get_user, record_sign_in, update_user
 from framework_common.framework_util.websocket_fix import ExtendBot
 from framework_common.framework_util.yamlLoader import YAMLManager
-from run.system_plugin.func_collection import call_user_data_register, call_user_data_query, call_user_data_sign, \
+from run.system_plugin.func_collection import call_user_data_query, call_user_data_sign, \
     call_change_city, call_change_name, call_permit
 
 
@@ -53,9 +53,8 @@ def main(bot: ExtendBot,config: YAMLManager):
     @bot.on(GroupMessageEvent)
     async def handle_group_message(event):
         #print(user_info)
-        if event.pure_text == "注册":
-            await call_user_data_register(bot,event,config)
-        elif event.pure_text =="我的信息" and config.system_plugin.config["user_data"]["是否启用个人信息查询"]:
+
+        if event.pure_text =="我的信息" and config.system_plugin.config["user_data"]["是否启用个人信息查询"]:
             await call_user_data_query(bot,event,config)
         elif event.pure_text == "签到" and config.system_plugin.config["user_data"]["是否启用签到"]:
             await call_user_data_sign(bot,event,config)
