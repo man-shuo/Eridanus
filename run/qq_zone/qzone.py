@@ -1168,13 +1168,16 @@ def main(bot: ExtendBot, config: YAMLManager):
         today_str = TimezoneHelper.get_user_local_time('Asia/Shanghai').strftime('%Y-%m-%d')
         history = get_task_history()
         last_date = history.get(task_name)
-        if last_date == today_str and not task_info.get("_force_test", False):
+        is_force_test = task_info.get("_force_test", False)
+        if last_date == today_str and not is_force_test:
             logger.warning(f"[Qzone 任务] 定时任务 [{task_name}] 今日({today_str})已经执行过，跳过重复触发！")
             return
 
-        history[task_name] = today_str
-        current_instance.last_scheduled_execution = history
-        save_task_history(history)
+        # 仅在非强制测试的正常定时触发时记录执行历史，避免手动“测试早安/晚安”后污染执行标记导致正规定时被跳过
+        if not is_force_test:
+            history[task_name] = today_str
+            current_instance.last_scheduled_execution = history
+            save_task_history(history)
 
         logger.info(f"[Qzone 任务] 开始执行定时发空间任务: {task_name}")
         bot_name, chara_text = get_bot_persona_info()
