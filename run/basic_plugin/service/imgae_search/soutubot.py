@@ -1,3 +1,23 @@
+import os
+import urllib.parse
+
+def get_local_file_path(url: str) -> str:
+    """解析本地 URI / 绝对路径 / 兼容反斜杠与 URL 解码"""
+    if not url:
+        return ""
+    p = str(url).strip()
+    if p.startswith("file:///"):
+        p = p[8:]
+    elif p.startswith("file://"):
+        p = p[7:]
+    try:
+        p = urllib.parse.unquote(p)
+    except Exception:
+        pass
+    if len(p) >= 3 and p[0] in ('/', '\\') and p[2] == ':' and p[1].isalpha():
+        p = p[1:]
+    return os.path.normpath(p)
+
 # -*- coding: utf-8 -*-
 import re
 import time
@@ -146,7 +166,7 @@ def search_img_by_path_or_url(target: str, factor: float = 1.2) -> dict:
             result = search_by_url(target, factor)
         else:
             print(f"[*] 本地图片搜索: {target}")
-            if target.startswith("file://"): target = target.replace("file://", "")
+            target = get_local_file_path(target)
             result = search_by_image(target, factor)
 
         return result["data"]

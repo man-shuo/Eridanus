@@ -1,4 +1,7 @@
 
+import os
+import urllib.parse
+
 import asyncio
 
 
@@ -22,6 +25,43 @@ async def delay_recall(bot, msg, interval=20):
         await bot.recall(msg['data']['message_id'])
 
     asyncio.create_task(recall_task())
+
+
+def get_local_file_path(url: str) -> str:
+    r"""
+    解析本地 URI / 绝对路径 / 兼容反斜杠与 URL 解码
+    支持 file:///D:/..., file://D:/..., /D:/..., D:/..., D:\... 等
+    """
+    if not url:
+        return ""
+    p = str(url).strip()
+    if p.startswith("file:///"):
+        p = p[8:]
+    elif p.startswith("file://"):
+        p = p[7:]
+    try:
+        p = urllib.parse.unquote(p)
+    except Exception:
+        pass
+    if len(p) >= 3 and p[0] in ('/', '\\') and p[2] == ':' and p[1].isalpha():
+        p = p[1:]
+    return os.path.normpath(p)
+
+def is_local_file_path(url: str) -> bool:
+    """判断输入是否为本地文件或 file:// URI"""
+    if not url:
+        return False
+    u = str(url).strip()
+    if u.startswith("file://"):
+        return True
+    if u.startswith(("http://", "https://", "data:image")):
+        return False
+    if len(u) >= 2 and u[1] == ':' and u[0].isalpha():
+        return True
+    if u.startswith(('/', '\\')):
+        return True
+    norm = get_local_file_path(u)
+    return os.path.exists(norm)
 
 async def get_img(event,bot):
     """
@@ -109,7 +149,6 @@ async def url_to_base64(url):
     return await util.image.Image2Base64(url)
 async def download_img(url, path=None, gray_layer=False, proxy=None, headers=None):
     """下载图片"""
-    if url.startswith("file://"): return url[7:]
     return await util.image.download_img(url, path, gray_layer, proxy, headers)
 async def download_file(url,path,proxy=None):
     """下载文件"""

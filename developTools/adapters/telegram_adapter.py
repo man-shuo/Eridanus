@@ -61,6 +61,10 @@ class TelegramAdapter:
         self.is_running = False
         self.tg_offset = 0
 
+        # 历史消息缓存: 用于响应下游插件调用的 bot.get_msg
+        self.msg_history: Dict[Any, dict] = {}
+        self._max_history_size: int = 2000
+
     @staticmethod
     def _normalize_proxy(proxy: Optional[str]) -> Optional[str]:
         if not proxy:
@@ -241,6 +245,41 @@ class TelegramAdapter:
                 data = json.loads(raw_msg)
                 action = data.get("action", "")
                 params = data.get("params", {})
+                echo = data.get("echo")
+
+                # 处理 get_msg 历史消息查询请求 (无需 target_chat)
+                if action == "get_msg":
+                    msg_id = params.get("message_id")
+                    cached = None
+                    if msg_id is not None:
+                        cached = self.msg_history.get(msg_id)
+                        if not cached:
+                            cached = self.msg_history.get(str(msg_id))
+                        if not cached and str(msg_id).isdigit():
+                            cached = self.msg_history.get(int(msg_id))
+                        if not cached:
+                            for k, v in self.msg_history.items():
+                                if (
+                                    v.get("real_id") == msg_id
+                                    or v.get("message_id") == msg_id
+                                    or str(v.get("real_id")) == str(msg_id)
+                                    or str(v.get("message_id")) == str(msg_id)
+                                ):
+                                    cached = v
+                                    break
+                    if cached:
+                        resp = {
+                            "status": "ok",
+                            "retcode": 0,
+                            "data": cached,
+                            "echo": echo
+                        }
+                        await self.ws.send(json.dumps(resp, ensure_ascii=False))
+                        self.logger.tg_info(f"[TelegramAdapter] 成功响应 get_msg 请求 (msg_id={msg_id})")
+                    else:
+                        self.logger.tg_warning(f"[TelegramAdapter] get_msg 未找到对应的历史消息缓存 (msg_id={msg_id})")
+                    continue
+
                 tg_chat_id = self._resolve_target_chat(data)
 
                 if not tg_chat_id:
@@ -271,6 +310,69 @@ class TelegramAdapter:
             except Exception as e:
                 self.logger.tg_error(f"[TelegramAdapter] 处理 Hub 消息异常: {e}")
 
+    @staticmethod
+    def _file_path_to_uri(local_path: str) -> str:
+        """将本地绝对路径转化为标准 file:/// URI，Windows 盘符及正斜杠规范化"""
+        abs_p = os.path.abspath(local_path).replace("\\", "/")
+        return f"file:///{abs_p}"
+
+    def _cache_message(self, onebot_event: dict, tg_msg_id: Optional[Any] = None):
+        """将消息缓存入历史映射，支持通过 OneBot message_id 和 TG message_id 检索"""
+        if not isinstance(onebot_event, dict):
+            return
+        msg_id = onebot_event.get("message_id")
+        if msg_id is not None:
+            self.msg_history[msg_id] = onebot_event
+            self.msg_history[str(msg_id)] = onebot_event
+        if tg_msg_id is not None:
+            self.msg_history[tg_msg_id] = onebot_event
+            self.msg_history[str(tg_msg_id)] = onebot_event
+        real_id = onebot_event.get("real_id")
+        if real_id is not None:
+            self.msg_history[real_id] = onebot_event
+            self.msg_history[str(real_id)] = onebot_event
+
+        # 控制缓存大小，避免长期运行内存膨胀
+        if len(self.msg_history) > self._max_history_size * 2:
+            keys_to_remove = list(self.msg_history.keys())[:len(self.msg_history) - self._max_history_size]
+            for k in keys_to_remove:
+                self.msg_history.pop(k, None)
+
+    def _extract_images_from_msg(self, msg: dict) -> List[str]:
+        """
+        从 Telegram 消息对象中提取所有图片类型的 file_id
+        包括:
+        1. photo (取分辨率最高的一个)
+        2. document (当 mime_type 以 image/ 开头，或文件名以图片格式结尾)
+        3. sticker (普通静态贴纸，非动图或视频)
+        """
+        file_ids = []
+        if not isinstance(msg, dict):
+            return file_ids
+
+        # 1. 普通照片
+        if "photo" in msg and isinstance(msg["photo"], list) and len(msg["photo"]) > 0:
+            file_ids.append(msg["photo"][-1]["file_id"])
+
+        # 2. 以文件形式发送的图片 (Document)
+        if "document" in msg and isinstance(msg["document"], dict):
+            doc = msg["document"]
+            mime = str(doc.get("mime_type", "")).lower()
+            fname = str(doc.get("file_name", "")).lower()
+            image_exts = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+            if mime.startswith("image/") or fname.endswith(image_exts):
+                if doc.get("file_id"):
+                    file_ids.append(doc["file_id"])
+
+        # 3. 静态贴纸 (Sticker)
+        if "sticker" in msg and isinstance(msg["sticker"], dict):
+            stk = msg["sticker"]
+            if not stk.get("is_animated") and not stk.get("is_video"):
+                if stk.get("file_id"):
+                    file_ids.append(stk["file_id"])
+
+        return file_ids
+
     def _resolve_local_path(self, raw_path: str) -> Optional[str]:
         """解析本地文件 URI / 绝对路径 / 反斜杠兼容性与 URL 解码"""
         p = str(raw_path).strip()
@@ -278,6 +380,10 @@ class TelegramAdapter:
             p = p[8:]
         elif p.startswith("file://"):
             p = p[7:]
+
+        # 处理 Windows 前导斜杠: /D:/path -> D:/path
+        if len(p) >= 3 and p[0] in ('/', '\\') and p[2] == ':' and p[1].isalpha():
+            p = p[1:]
 
         candidates = [p]
         try:
@@ -752,9 +858,58 @@ class TelegramAdapter:
 
         # 1. 引用回复 (Reply)
         reply_to = msg.get("reply_to_message")
+        rep_event_data = None
         if reply_to:
             rep_id = reply_to.get("message_id")
             onebot_messages.append({"type": "reply", "data": {"id": rep_id}})
+
+            # 提取被引用消息中的图片
+            rep_file_ids = self._extract_images_from_msg(reply_to)
+            rep_images = []
+            for fid in rep_file_ids:
+                local_rep_img = await self._download_file(fid)
+                if local_rep_img:
+                    uri = self._file_path_to_uri(local_rep_img)
+                    rep_images.append(uri)
+
+            rep_text = reply_to.get("text", "") or reply_to.get("caption", "")
+            rep_sender = reply_to.get("from", {})
+            rep_sid = rep_sender.get("id", 0)
+            rep_sname = (rep_sender.get("first_name", "") + " " + rep_sender.get("last_name", "")).strip() or "User"
+
+            rep_messages = []
+            rep_raw = rep_text
+            for r_uri in rep_images:
+                rep_messages.append({"type": "image", "data": {"file": r_uri, "url": r_uri}})
+                rep_raw += f"[CQ:image,file={r_uri}]"
+            if rep_text:
+                rep_messages.append({"type": "text", "data": {"text": rep_text}})
+
+            rep_event_data = {
+                "self_id": self.bot_id,
+                "user_id": rep_sid,
+                "time": reply_to.get("date", int(time.time())),
+                "message_type": "group" if chat_type != "private" else "private",
+                "message_id": rep_id,
+                "real_id": rep_id,
+                "message_seq": rep_id % 2147483647 if isinstance(rep_id, int) else 0,
+                "sender": {
+                    "user_id": rep_sid,
+                    "nickname": rep_sname,
+                    "card": "",
+                    "role": "member",
+                    "title": ""
+                },
+                "raw_message": rep_raw,
+                "message": rep_messages,
+                "message_format": "array",
+                "post_type": "message",
+                "sub_type": "normal",
+                "group_id": virtual_group_id,
+                "font": 0,
+                "adapter_source": "telegram"
+            }
+            self._cache_message(rep_event_data, tg_msg_id=rep_id)
 
         # 2. 检查是否 @ 了 Bot 自身
         is_mentioned = False
@@ -765,7 +920,6 @@ class TelegramAdapter:
                 is_mentioned = True
                 clean_text = text.replace(at_tag, "").strip()
 
-        # 频道 post、私聊或者显式 @ Bot / 斜杠指令 时注入 OneBot At 消息段，确保触发 Bot 回复
         # 针对常见问候/起始指令去除前缀 '/'，避免被 mai_reply 的 ignore_prefixes: ['/', '#'] 过滤
         if clean_text.lower() == "/start":
             clean_text = "你好"
@@ -784,12 +938,15 @@ class TelegramAdapter:
         if should_at:
             onebot_messages.insert(0, {"type": "at", "data": {"qq": self.bot_id}})
 
-        # 3. 接收图片
-        if "photo" in msg:
-            photo = msg["photo"][-1]
-            local_img = await self._download_file(photo["file_id"])
+        # 3. 接收图片 (支持 photo, document, sticker)
+        img_file_ids = self._extract_images_from_msg(msg)
+        img_uris = []
+        for fid in img_file_ids:
+            local_img = await self._download_file(fid)
             if local_img:
-                onebot_messages.append({"type": "image", "data": {"file": f"file:///{os.path.abspath(local_img)}"}})
+                uri = self._file_path_to_uri(local_img)
+                img_uris.append(uri)
+                onebot_messages.append({"type": "image", "data": {"file": uri, "url": uri}})
 
         # 4. 文本内容
         if clean_text:
@@ -797,6 +954,18 @@ class TelegramAdapter:
 
         if not onebot_messages:
             return
+
+        # 拼装 raw_message，包含 CQ 码，确保 Downstream 框架及插件能解析图片
+        raw_parts = []
+        if should_at:
+            raw_parts.append(f"[CQ:at,qq={self.bot_id}]")
+        if reply_to:
+            raw_parts.append(f"[CQ:reply,id={reply_to.get('message_id')}]")
+        if clean_text:
+            raw_parts.append(clean_text)
+        for u in img_uris:
+            raw_parts.append(f"[CQ:image,file={u}]")
+        raw_message_str = " ".join(raw_parts).strip()
 
         now_ms = int(time.time() * 1000)
         # 记录 OneBot message_id 与 TG message_id 映射
@@ -821,7 +990,7 @@ class TelegramAdapter:
                 "role": "admin" if (user_id == self.default_qq_id) else "member",
                 "title": "Telegram"
             },
-            "raw_message": clean_text,
+            "raw_message": raw_message_str,
             "font": 14,
             "sub_type": "normal",
             "message": onebot_messages,
@@ -830,28 +999,38 @@ class TelegramAdapter:
             "group_id": virtual_group_id,
             "adapter_source": "telegram"
         }
+        if rep_event_data:
+            onebot_event["reply"] = rep_event_data
+
+        # 写入历史消息缓存
+        self._cache_message(onebot_event, tg_msg_id=tg_msg_id)
 
         # 通过 WebSocket 注入 Hub
         if self.ws:
             event_json = json.dumps(onebot_event, ensure_ascii=False)
             await self.ws.send(event_json)
             self.logger.tg_info(
-                f"[TelegramAdapter] 转发 TG 消息至 Hub -> 虚拟群: {virtual_group_id} (原TG: {chat_id}, 类型: {chat_type}), 内容: '{clean_text}'"
+                f"[TelegramAdapter] 转发 TG 消息至 Hub -> 虚拟群: {virtual_group_id} (原TG: {chat_id}, 类型: {chat_type}), 内容: '{raw_message_str}'"
             )
 
     async def _download_file(self, file_id: str) -> Optional[str]:
         try:
-            async with httpx.AsyncClient(proxy=self.proxy, timeout=20.0) as client:
+            async with httpx.AsyncClient(proxy=self.proxy, timeout=30.0) as client:
                 r = await client.get(f"https://api.telegram.org/bot{self.token}/getFile", params={"file_id": file_id})
                 if r.status_code == 200 and r.json().get("ok"):
                     file_path = r.json()["result"]["file_path"]
+                    ext = os.path.splitext(file_path)[1]
+                    if not ext:
+                        ext = ".jpg"
                     dl_url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
                     res = await client.get(dl_url)
                     os.makedirs("data/pictures/tg_recv", exist_ok=True)
-                    local_path = os.path.join("data/pictures/tg_recv", f"{file_id}.jpg")
+                    local_path = os.path.join("data/pictures/tg_recv", f"{file_id}{ext}")
                     with open(local_path, "wb") as f:
                         f.write(res.content)
                     return local_path
+                else:
+                    self.logger.tg_warning(f"[TelegramAdapter] getFile 失败: {r.status_code} {r.text}")
         except Exception as e:
             self.logger.tg_error(f"[TelegramAdapter] 下载 Telegram 图片异常: {e}")
         return None

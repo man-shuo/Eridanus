@@ -1,3 +1,40 @@
+import os
+import urllib.parse
+
+def get_local_file_path(url: str) -> str:
+    """解析本地 URI / 绝对路径 / 兼容反斜杠与 URL 解码"""
+    if not url:
+        return ""
+    p = str(url).strip()
+    if p.startswith("file:///"):
+        p = p[8:]
+    elif p.startswith("file://"):
+        p = p[7:]
+    try:
+        p = urllib.parse.unquote(p)
+    except Exception:
+        pass
+    if len(p) >= 3 and p[0] in ('/', '\\') and p[2] == ':' and p[1].isalpha():
+        p = p[1:]
+    return os.path.normpath(p)
+
+
+def is_local_file_path(url: str) -> bool:
+    """判断是否为本地文件路径或 file:// URI"""
+    if not url:
+        return False
+    u = str(url).strip()
+    if u.startswith("file://"):
+        return True
+    if u.startswith(("http://", "https://", "data:image")):
+        return False
+    if len(u) >= 2 and u[1] == ':' and u[0].isalpha():
+        return True
+    if u.startswith(('/', '\\')):
+        return True
+    norm = get_local_file_path(u)
+    return os.path.exists(norm)
+
 import asyncio
 import traceback
 
@@ -25,7 +62,7 @@ async def call_image_search(bot, event, config, image_url=None):
     recall_id = await bot.send(event, "正在搜索图片，请等待结果返回.....")
     if user_info.permission >= config.basic_plugin.config["搜图"]["search_image_resource_operate_level"]:
         if not image_url:
-            img_url = event.get("image")[0]["url"]
+            img_url = event.get("image")[0].get("url") or event.get("image")[0].get("file")
         else:
             img_url = image_url
         """
@@ -86,7 +123,8 @@ async def call_image_search2(bot, event, config, img_url):
         return
     bot.logger.info("调用soutu.bot搜索图片")
     img_path = "data/pictures/cache/" + random_str() + ".png"
-    if img_url.startswith("file://"): img_path = img_url[7:]
+    if is_local_file_path(img_url):
+        img_path = get_local_file_path(img_url)
     else:
         await download_img(img_url, img_path)
     forMeslist = []
@@ -120,8 +158,8 @@ async def call_image_search2(bot, event, config, img_url):
 
 async def call_image_search3(bot, event, config, img_url):
     img_path = "data/pictures/cache/" + random_str() + ".png"
-    if img_url.startswith("file://"):
-        img_path = img_url[7:]
+    if is_local_file_path(img_url):
+        img_path = get_local_file_path(img_url)
     else:
         await download_img(img_url, img_path)
     r=await search_(img_path)
@@ -158,7 +196,7 @@ def main(bot: ExtendBot,config:YAMLManager):
                 await bot.recall(recall_id['data']['message_id'])
             try:
                 await call_image_search(bot, event, config)
-                img_url = event.get("image")[0]["url"]
+                img_url = event.get("image")[0].get("url") or event.get("image")[0].get("file")
             finally:
                 try:
                     image_search.pop(event.sender.user_id)

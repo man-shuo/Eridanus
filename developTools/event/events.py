@@ -38,6 +38,10 @@ class Reply(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    @property
+    def message_chain(self) -> MessageChain:
+        return MessageChain(self.message)
+
     @validator("message", pre=True, always=True)
     def ensure_message_chain(cls, value):
         """确保 message 是 MessageChain 实例"""

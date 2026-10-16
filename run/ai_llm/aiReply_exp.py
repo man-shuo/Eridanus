@@ -1,3 +1,4 @@
+import urllib.parse
 import asyncio
 import base64
 import datetime
@@ -24,22 +25,40 @@ from run.ai_llm.service.heartflow_client import heartflow_request
 BASE64_PATTERN = re.compile(r'^data:([^;]+);base64,(.+)$', re.DOTALL)
 
 
-def is_local_file_path(url: str) -> bool:
-    """检查是否是本地文件路径"""
-    if url.startswith("file://"):
-        return True
-    if len(url) >= 2 and url[1] == ':' and url[0].isalpha():
-        return True
-    if url.startswith("/") and not url.startswith("//"):
-        return True
-    return False
-
-
 def get_local_file_path(url: str) -> str:
-    """获取本地文件的实际路径"""
-    if url.startswith("file://"):
-        return url[7:]
-    return url
+    """解析本地 URI / 绝对路径 / 兼容反斜杠与 URL 解码"""
+    if not url:
+        return ""
+    p = str(url).strip()
+    if p.startswith("file:///"):
+        p = p[8:]
+    elif p.startswith("file://"):
+        p = p[7:]
+    try:
+        p = urllib.parse.unquote(p)
+    except Exception:
+        pass
+    if len(p) >= 3 and p[0] in ('/', '\\') and p[2] == ':' and p[1].isalpha():
+        p = p[1:]
+    return os.path.normpath(p)
+
+
+def is_local_file_path(url: str) -> bool:
+    """判断是否为本地文件路径或 file:// URI"""
+    if not url:
+        return False
+    u = str(url).strip()
+    if u.startswith("file://"):
+        return True
+    if u.startswith(("http://", "https://", "data:image")):
+        return False
+    if len(u) >= 2 and u[1] == ':' and u[0].isalpha():
+        return True
+    if u.startswith(('/', '\\')):
+        return True
+    norm = get_local_file_path(u)
+    return os.path.exists(norm)
+
 
 
 async def _process_image_for_heartflow(url: str, client_type: str) -> dict:

@@ -1,3 +1,6 @@
+import os
+import shutil
+import urllib.parse
 import base64
 import random
 import re
@@ -10,6 +13,25 @@ import requests
 from PIL import Image
 
 from .base import BaseTool
+
+
+
+def _get_local_file_path(url: str) -> str:
+    """解析本地 URI / 绝对路径 / 兼容反斜杠与 URL 解码"""
+    if not url:
+        return ""
+    p = str(url).strip()
+    if p.startswith("file:///"):
+        p = p[8:]
+    elif p.startswith("file://"):
+        p = p[7:]
+    try:
+        p = urllib.parse.unquote(p)
+    except Exception:
+        pass
+    if len(p) >= 3 and p[0] in ('/', '\\') and p[2] == ':' and p[1].isalpha():
+        p = p[1:]
+    return os.path.normpath(p)
 
 
 class NetworkProcessor(BaseTool):
@@ -74,6 +96,11 @@ class NetworkProcessor(BaseTool):
             characters = string.ascii_letters + string.digits
             random_string = ''.join(random.choice(characters) for _ in range(10))
             path = f'data/pictures/cache/{random_string}.jpg'
+
+        dir_name = os.path.dirname(os.path.abspath(path))
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+
         if url.startswith("data:image"):
             match = re.match(r"data:image/(.*?);base64,(.+)", url)
             if not match:
@@ -85,6 +112,20 @@ class NetworkProcessor(BaseTool):
                     f.write(img_data)
             finally:
                 del img_data
+            return path
+
+        # 处理本地 file:// 协议与绝对路径
+        if url.startswith("file://") or (not url.startswith(("http://", "https://")) and os.path.isfile(_get_local_file_path(url))):
+            local_src = _get_local_file_path(url)
+            if not os.path.isfile(local_src):
+                raise FileNotFoundError(f"本地图片不存在：{local_src}")
+            if gray_layer:
+                with Image.open(local_src) as img:
+                    image_raw = img
+                    image_black_white = image_raw.convert('1')
+                    image_black_white.save(path)
+            else:
+                shutil.copyfile(local_src, path)
             return path
 
         if proxy is not None and proxy != '':

@@ -88,7 +88,7 @@ ip_whitelist = []
 # ip_whitelist = ["127.0.0.1","192.168.195.128","192.168.195.137","::1"]
 
 # 合法的消息事件，其余不储存进数据库。
-valid_message_actions = ['send_group_forward_msg', 'send_private_forward_msg', 'send_group_msg', 'send_private_msg', 'upload_group_file', 'upload_private_file']
+valid_message_actions = ['send_group_forward_msg', 'send_private_forward_msg', 'send_group_msg', 'send_private_msg', 'upload_group_file', 'upload_private_file', 'get_msg']
 
 # 用户信息文件
 user_file = "./user_info.yaml"
@@ -1531,7 +1531,20 @@ def handle_websocket(ws):
             message = ws.receive()
             # logger.server(f"收到前端消息: {message} {type(message)}")
             message = json.loads(message)
-            if "echo" in message:
+
+            # 外部适配器（如 TelegramAdapter）对 Action（如 get_msg）的响应帧，直接转发给主程序/请求端
+            if isinstance(message, dict) and "status" in message and "echo" in message:
+                resp_json = json.dumps(message, ensure_ascii=False)
+                for client in list(clients):
+                    if client != ws:
+                        try:
+                            client.send(resp_json)
+                        except Exception:
+                            clients.discard(client)
+                continue
+
+            # 对于不需要适配器返回数据的普通指令，返回虚拟确认；查询类（如 get_msg）由真实适配器响应
+            if "echo" in message and message.get("action") != "get_msg":
                 for client in list(clients):
                     try:
                         client.send(json.dumps({'status': 'ok',
@@ -1610,8 +1623,8 @@ def handle_websocket(ws):
                         except Exception:
                             clients.discard(client)
 
-                # 如果是 WebUI 的本地群，则持久化消息
-                if target_group_id == 879886836:
+                # 如果是 WebUI 的本地群，则持久化消息（排除查询动作如 get_msg）
+                if target_group_id == 879886836 and message.get("action") != "get_msg":
                     is_update = True
                     message_id = time_now
                     role = 'start'
