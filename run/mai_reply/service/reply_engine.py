@@ -413,8 +413,8 @@ class ReplyEngine:
             self.impression_updater.tick(user_id, group_id, user_name, bot_name)
             self.audit_system.tick(user_id, group_id, user_name, bot_name, bot)
 
-            # 群印象更新 tick（有群 ID 时触发）
-            if is_group and group_id:
+            # 群印象更新 tick（有群 ID 且该群启用群印象时触发）
+            if is_group and group_id and self.impression_updater.is_group_impression_enabled(group_id):
                 self.impression_updater.tick_group(group_id, group_name, bot_name)
 
             current_score = self.emotion.get_score()

@@ -389,12 +389,13 @@ def main(bot: ExtendBot, config: YAMLManager):
                         message_context_text,
                         user_id=event.user_id,  # ← 传入 user_id
                     )
-                    # 群印象计数 tick（即便不回复，也感知气氛）
-                    group_name_hint = str(event.group_id)  # 此处无法拿到群名，用 group_id 代替
-                    bot_name_hint = config.common_config.basic_config["bot"]
-                    engine.impression_updater.tick_group(
-                        event.group_id, group_name_hint, bot_name_hint
-                    )
+                    # 只有在群印象启用且该群允许时，才进行群印象 tick
+                    if engine.impression_updater.is_group_impression_enabled(event.group_id):
+                        group_name_hint = str(event.group_id)  # 此处无法拿到群名，用 group_id 代替
+                        bot_name_hint = config.common_config.basic_config["bot"]
+                        engine.impression_updater.tick_group(
+                            event.group_id, group_name_hint, bot_name_hint
+                        )
                 except Exception:
                     pass
 

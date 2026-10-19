@@ -177,13 +177,64 @@ class ImpressionUpdater:
             logger.info(f"[MaiReply] trigger_llm 未配置，记忆槽位与印象更新回退使用主回复模型: model={self.model}")
 
         self.max_chars = int(ccfg.get("impression_max_chars", IMPRESSION_MAX_CHARS))
+        # 用户印象更新轮数（优先读 user_trigger_turns，兼容 impression_trigger_turns）
+        self.user_imp_trigger: int = int(
+            ccfg.get("user_trigger_turns")
+            or ccfg.get("impression_trigger_turns")
+            or SUMMARY_TRIGGER_TURNS
+        )
         self.group_imp_trigger: int = int(ccfg.get("group_trigger_msgs", GROUP_IMP_TRIGGER_MSGS))
         self.group_imp_max_chars: int = int(ccfg.get("group_max_chars", GROUP_IMP_MAX_CHARS))
 
-        self.enable_group_impression: bool = ccfg.get("enable_impression", True)
+        self.enable_group_impression: bool = ccfg.get(
+            "enable_group_impression", ccfg.get("enable_impression", True)
+        )
         self.group_impression_ttl: int = ccfg.get("impression_ttl", 604800)
+        self.group_impression_whitelist_enabled: bool = bool(
+            ccfg.get("group_impression_whitelist_enabled", True)
+        )
+        self.group_impression_whitelist: list = [
+            int(x) for x in ccfg.get("group_impression_whitelist", []) if str(x).isdigit()
+        ]
         # 构建回复时，最多读取最近 N 位发言者的 impression
         self.group_reply_impression_count: int = ccfg.get("group_reply_impression_count", 3)
+
+    def is_group_impression_enabled(self, group_id) -> bool:
+        """
+        判断指定群聊是否允许启用群聊印象：
+        1. 若全局 enable_group_impression 为 False，直接禁用；
+        2. 若 group_impression_whitelist_enabled 为 True（白名单模式）：
+           - 若填写了 group_impression_whitelist，仅在该列表中的群生效；
+           - 若 group_impression_whitelist 为 []（未填写），自动使用 trigger_llm 配置的 whitelist；
+        3. 若 group_impression_whitelist_enabled 为 False（全局模式）：
+           - 对所有群使用群聊印象。
+        """
+        if not self.enable_group_impression:
+            return False
+
+        if not group_id:
+            return False
+
+        try:
+            gid = int(group_id)
+        except (ValueError, TypeError):
+            return False
+
+        # 白名单模式
+        if self.group_impression_whitelist_enabled:
+            if self.group_impression_whitelist:
+                return gid in self.group_impression_whitelist
+
+            # 若未填写，自动使用 trigger_llm 配置的 whitelist
+            cfg = YAMLManager.get_instance()
+            trig_cfg = cfg.mai_reply.config.get("trigger_llm", {})
+            trig_whitelist = [
+                int(x) for x in trig_cfg.get("whitelist", []) if str(x).isdigit()
+            ]
+            return gid in trig_whitelist
+
+        # 全局模式（group_impression_whitelist_enabled=False，对所有群生效）
+        return True
 
     def _counter_key(self, user_id: int, group_id) -> str:
         return f"{group_id or 'priv'}:{user_id}"
@@ -385,7 +436,7 @@ class ImpressionUpdater:
         """每次对话完成后调用，达到触发轮数时异步更新用户印象与硬事实记忆"""
         key = self._counter_key(user_id, group_id)
         self._counters[key] = self._counters.get(key, 0) + 1
-        if self._counters[key] >= SUMMARY_TRIGGER_TURNS:
+        if self._counters[key] >= self.user_imp_trigger:
             self._counters[key] = 0
             asyncio.create_task(
                 self._update_impression(user_id, group_id, user_name, bot_name)
@@ -466,7 +517,7 @@ class ImpressionUpdater:
         每次有群消息进入旁观窗口时调用。
         累计到 group_imp_trigger 条时，异步触发群印象更新。
         """
-        if not self.enable_group_impression:
+        if not self.is_group_impression_enabled(group_id):
             return
         self._group_counters[group_id] = self._group_counters.get(group_id, 0) + 1
         if self._group_counters[group_id] >= self.group_imp_trigger:
@@ -478,6 +529,8 @@ class ImpressionUpdater:
     async def _update_group_impression(
         self, group_id: int, group_name: str, bot_name: str
     ) -> None:
+        if not self.is_group_impression_enabled(group_id):
+            return
         try:
             window = self._ctx._load_group_window(group_id)
             if not window:

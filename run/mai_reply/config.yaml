@@ -62,12 +62,18 @@ context: # 上下文相关配置
   group_context_window: 15   # 群聊上下文：读取群内最近N条消息作为旁观上下文（让bot感知群聊气氛）
   session_ttl: 7200      # 2小时   # Redis TTL（秒）。会话历史缓存存活时间
   enable_impression: true   # 是否启用用户印象记忆（跨会话）
+  user_trigger_turns: 3     # 用户印象更新间隔（每几轮对话更新一次用户印象，默认3轮）
   impression_model: ""   #生成用户印象使用的模型，留空则使用llm配置中的模型。建议改成廉价快速的模型
   impression_ttl: 604800  # 7天 印象保留时间
   impression_max_chars: 600 #用户impression最大字数
   group_reply_impression_count: 3 #群聊回复时调用其他n个用户印象
+  enable_group_impression: true # 是否启用群聊气氛印象
+  # 群聊印象的白名单模式 / 全局模式控制
+  group_impression_whitelist_enabled: true # 是否启用白名单模式。true=白名单模式（仅白名单群触发）；false=全局模式（对所有群生效）
+  group_impression_whitelist: []            # 群聊印象白名单群号列表。若开启了白名单模式但此处为[]，将自动使用trigger_llm配置的whitelist
   group_trigger_msgs: 10 #群聊印象更新间隔
   group_max_chars: 600 #群聊印象最大字数
+
   # 结构化固定记忆槽位与全局独立经历记忆层（独立功能开关）
   enable_memory_slots: false   # 是否开启结构化长期固定事实记忆与Bot全局独立生活记忆层
   global_memory_slot_count: 10  # Bot全局独立生活经历记忆槽位数（默认10条）
