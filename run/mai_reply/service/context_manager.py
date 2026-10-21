@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from framework_common.database_util.RedisCacheManager import create_custom_cache_manager
+from framework_common.utils.system_logger import get_logger
 from run.mai_reply.service.memory_slot_manager import MemorySlotManager
+
+logger = get_logger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -128,12 +131,16 @@ class ContextManager:
         self.user_memory_mode: str = str(ccfg.get("user_memory_mode", "auto")).strip().lower()
         self.group_memory_mode: str = str(ccfg.get("group_memory_mode", "auto")).strip().lower()
         self.group_user_context_turns: int = int(ccfg.get("group_user_context_turns", 3))
-        self.group_include_private_context: bool = bool(ccfg.get("group_include_private_context", True))
+        self._warned_user_mode: bool = False
+        self._warned_group_mode: bool = False
         self.memory_slots = MemorySlotManager(
             db_path=imp_sqlite_path,
             cache_manager=self._imp_cache,
             config=config,
         )
+        # 初始化时检查记忆模式，若有冲突提前在日志中发出 warning 提醒
+        self.get_effective_user_memory_mode()
+        self.get_effective_group_memory_mode()
 
     # ------------------------------------------------------------------ 内部读写辅助（带双层 fallback）
 
@@ -515,16 +522,31 @@ class ContextManager:
         解析当前生效的用户记忆模式：
         - 仅开启 slots: "slots"
         - 仅开启 impression: "impression"
-        - 两者皆开启: 根据 user_memory_mode ("slots", "impression", "both") 决定，默认 "slots"
-        - 两者皆关闭: "none"
+        - 两者皆开启: 根据 user_memory_mode ("slots", "impression", "both") 决定，默认 "slots"。
+          若模式不为 both（如为 slots），则视同 impression 关闭并记录警告日志，避免浪费 API token。
+        - 两者皆关闭: "none"（保底方案，二者均不注入、不更新）
         """
         slots_on = bool(self.enable_memory_slots)
         imp_on = bool(self.enable_impression)
         if slots_on and imp_on:
             mode = self.user_memory_mode
-            if mode in ("slots", "impression", "both"):
-                return mode
-            return "slots"
+            if mode == "slots":
+                if not getattr(self, "_warned_user_mode", False):
+                    logger.warning("[MaiReply] 同时开启了 enable_impression 与 enable_memory_slots，但 user_memory_mode 为 'slots'，主观印象(Impression)视同关闭，避免浪费API token。")
+                    self._warned_user_mode = True
+                return "slots"
+            elif mode == "impression":
+                if not getattr(self, "_warned_user_mode", False):
+                    logger.warning("[MaiReply] 同时开启了 enable_impression 与 enable_memory_slots，但 user_memory_mode 为 'impression'，记忆槽位(Slots)视同关闭。")
+                    self._warned_user_mode = True
+                return "impression"
+            elif mode == "both":
+                return "both"
+            else:
+                if not getattr(self, "_warned_user_mode", False):
+                    logger.warning(f"[MaiReply] 未知的 user_memory_mode '{mode}'，默认采用 'slots' 并视同关闭主观印象。")
+                    self._warned_user_mode = True
+                return "slots"
         elif slots_on:
             return "slots"
         elif imp_on:
@@ -536,16 +558,31 @@ class ContextManager:
         解析当前生效的群聊记忆模式：
         - 仅开启 slots: "slots"
         - 仅开启 impression: "impression"
-        - 两者皆开启: 根据 group_memory_mode ("slots", "impression", "both") 决定，默认 "slots"
-        - 两者皆关闭: "none"
+        - 两者皆开启: 根据 group_memory_mode ("slots", "impression", "both") 决定，默认 "slots"。
+          若模式不为 both（如为 slots），则视同 group impression 关闭并记录警告日志，避免浪费 API token。
+        - 两者皆关闭: "none"（保底方案，二者均不注入、不更新）
         """
         slots_on = bool(getattr(self, "enable_group_memory_slots", False))
         imp_on = bool(self.enable_group_impression)
         if slots_on and imp_on:
             mode = self.group_memory_mode
-            if mode in ("slots", "impression", "both"):
-                return mode
-            return "slots"
+            if mode == "slots":
+                if not getattr(self, "_warned_group_mode", False):
+                    logger.warning("[MaiReply] 同时开启了 enable_group_impression 与 enable_group_memory_slots，但 group_memory_mode 为 'slots'，群印象(Group Impression)视同关闭，避免浪费API token。")
+                    self._warned_group_mode = True
+                return "slots"
+            elif mode == "impression":
+                if not getattr(self, "_warned_group_mode", False):
+                    logger.warning("[MaiReply] 同时开启了 enable_group_impression 与 enable_group_memory_slots，但 group_memory_mode 为 'impression'，群槽位(Group Slots)视同关闭。")
+                    self._warned_group_mode = True
+                return "impression"
+            elif mode == "both":
+                return "both"
+            else:
+                if not getattr(self, "_warned_group_mode", False):
+                    logger.warning(f"[MaiReply] 未知的 group_memory_mode '{mode}'，默认采用 'slots' 并视同关闭群印象。")
+                    self._warned_group_mode = True
+                return "slots"
         elif slots_on:
             return "slots"
         elif imp_on:
@@ -602,29 +639,16 @@ class ContextManager:
         return result
 
     def get_group_user_session_context(
-        self, group_id: int, user_id: int, max_turns: Optional[int] = None, include_private: Optional[bool] = None
+        self, group_id: int, user_id: int, max_turns: Optional[int] = None, *args, **kwargs
     ) -> List[Dict]:
         """
         获取群聊被 @ 时针对当前用户的上下文历史：
-        群聊不需要让用户单独的对话历史占据过多空间，仅保留少量轮数（默认2-3轮），
-        优先取群内该用户上下文，不足时适度补充最近1-2轮私聊上下文，
-        确保群公屏消息在上下文中有更高占比。
+        群聊不需要让用户单独的私聊历史占据空间，仅提取该用户在群内的最近少量轮数（默认2-3轮），
+        彻底去除私聊上下文引入，将宝贵的上下文窗口留给群公屏消息与群记忆。
         """
         turns = max_turns if max_turns is not None else self.group_user_context_turns
-        inc_priv = include_private if include_private is not None else self.group_include_private_context
         max_msgs = max(1, turns) * 2
-
         group_history = self.get_session_history(group_id, user_id)
-        if len(group_history) >= 2:
-            return group_history[-max_msgs:]
-
-        # 若群内该用户历史较少且允许私聊融合
-        if inc_priv:
-            priv_history = self.get_session_history(None, user_id)
-            if priv_history:
-                combined = priv_history[-2:] + group_history
-                return combined[-max_msgs:]
-
         return group_history[-max_msgs:]
 
     def get_recent_speaker_impressions(self, group_id: int) -> List[Dict]:

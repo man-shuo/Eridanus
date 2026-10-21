@@ -614,6 +614,9 @@ class ImpressionUpdater:
 
     def tick(self, user_id: int, group_id, user_name: str, bot_name: str) -> None:
         """每次对话完成后调用，达到触发轮数时异步更新用户印象与硬事实记忆"""
+        user_mode = self._ctx.get_effective_user_memory_mode() if hasattr(self._ctx, "get_effective_user_memory_mode") else "slots"
+        if user_mode == "none":
+            return
         key = self._counter_key(user_id, group_id)
         self._counters[key] = self._counters.get(key, 0) + 1
         if self._counters[key] >= self.user_imp_trigger:

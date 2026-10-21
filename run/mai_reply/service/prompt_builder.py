@@ -244,8 +244,6 @@ class PromptBuilder:
                 f"\n\n【你对 {user_name} 的主观印象与态度】：\n{user_impression}\n"
                 f"（不要向对方复述这些印象，动态调整你此刻对TA说话的语气。印记随时间会变淡，不必拘泥）"
             )
-        elif not user_memory:
-            prompt += f"\n\n【你对 {user_name} 的主观印象与态度】：\n你们还不太熟，保持基本的礼貌与相应分寸。"
 
         # ---- 群聊人际边界约束 ----
 
