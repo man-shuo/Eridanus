@@ -110,26 +110,33 @@ def setup_git_proxy_if_interactive():
         logger.debug(f"Git 代理交互配置跳过或异常: {e}")
 
 
-def merge_dicts(old, new):
-    for k, v in old.items():
-        if isinstance(v, dict) and k in new and isinstance(new[k], dict):
-            merge_dicts(v, new[k])
-        elif isinstance(v, list) and k in new and isinstance(new[k], list):
+def merge_dicts(old, new, path=""):
+    for k, v in list(old.items()):
+        key_path = f"{path}.{k}" if path else str(k)
+        if k not in new:
+            # 新模板中已不存在该配置项（官方已废弃、删除或更名），不再合入新配置，保持新配置文件结构干净规范
+            logger.info(f"清理已废弃或新版本中不存在的旧配置项: {key_path}")
+            continue
+
+        if isinstance(v, dict) and isinstance(new[k], dict):
+            merge_dicts(v, new[k], key_path)
+        elif isinstance(v, list) and isinstance(new[k], list):
             if k in ["api_keys", "sdUrl", "其他默认绘图参数", "card_index", "steam_api_key", "nano_banana_key", "固定入群欢迎", "apikey"]:
                 new[k] = v
             elif k.startswith("page"):
-                logger.warning("当前任务为菜单，使用最新配置覆盖旧配置。")
+                logger.warning(f"当前任务为菜单 [{key_path}]，使用最新配置覆盖旧配置。")
             else:
                 try:
                     new[k] = list(dict.fromkeys(new[k] + v))
                 except Exception:
-                    logger.error("列表合并出错，默认用最新配置")
-        elif k in new and not isinstance(v, type(new[k])) and not isinstance(new[k], type(v)):
-            continue
-        elif k in new:
+                    logger.error(f"列表合并出错 [{key_path}]，默认用最新配置")
+        elif new[k] is None:
+            # 新模板预留的空值项，沿用旧配置的具体值
             new[k] = v
+        elif not isinstance(v, type(new[k])) and not isinstance(new[k], type(v)):
+            logger.warning(f"配置项 [{key_path}] 数据类型不一致 (旧: {type(v).__name__}, 新: {type(new[k]).__name__})，使用新模板默认值")
+            continue
         else:
-            # 旧配置中有但新模板中没有的自定义字段，完整保留
             new[k] = v
 
 
