@@ -100,8 +100,11 @@ class ContextManager:
         self.group_impression_whitelist: list = [
             int(x) for x in ccfg.get("group_impression_whitelist", []) if str(x).isdigit()
         ]
-        # 构建回复时，最多读取最近 N 位发言者的 impression
-        self.group_reply_impression_count: int = ccfg.get("group_reply_impression_count", 3)
+        # 群聊回复时，最多读取最近 N 位发言者的记忆（槽位特征或主观印象）
+        self.group_reply_speaker_memory_count: int = int(
+            ccfg.get("group_reply_speaker_memory_count", ccfg.get("group_reply_impression_count", 3))
+        )
+        self.group_reply_impression_count: int = self.group_reply_speaker_memory_count
 
         db_cfg = config.mai_reply.config.get("redis", {})
         ctx_db = db_cfg.get("context_db", 5)
@@ -120,6 +123,12 @@ class ContextManager:
 
         # 结构化固定记忆槽位层（全局独立生活记忆 + 用户专属长期事实记忆）
         self.enable_memory_slots: bool = ccfg.get("enable_memory_slots", True)
+        self.enable_group_memory_slots: bool = ccfg.get("enable_group_memory_slots", True)
+        self.group_memory_slot_count: int = int(ccfg.get("group_memory_slot_count", 10))
+        self.user_memory_mode: str = str(ccfg.get("user_memory_mode", "auto")).strip().lower()
+        self.group_memory_mode: str = str(ccfg.get("group_memory_mode", "auto")).strip().lower()
+        self.group_user_context_turns: int = int(ccfg.get("group_user_context_turns", 3))
+        self.group_include_private_context: bool = bool(ccfg.get("group_include_private_context", True))
         self.memory_slots = MemorySlotManager(
             db_path=imp_sqlite_path,
             cache_manager=self._imp_cache,
@@ -498,13 +507,133 @@ class ContextManager:
             count += 1
         return count
 
+
+    # ------------------------------------------------------------------ 记忆模式解析与群槽位支持
+
+    def get_effective_user_memory_mode(self) -> str:
+        """
+        解析当前生效的用户记忆模式：
+        - 仅开启 slots: "slots"
+        - 仅开启 impression: "impression"
+        - 两者皆开启: 根据 user_memory_mode ("slots", "impression", "both") 决定，默认 "slots"
+        - 两者皆关闭: "none"
+        """
+        slots_on = bool(self.enable_memory_slots)
+        imp_on = bool(self.enable_impression)
+        if slots_on and imp_on:
+            mode = self.user_memory_mode
+            if mode in ("slots", "impression", "both"):
+                return mode
+            return "slots"
+        elif slots_on:
+            return "slots"
+        elif imp_on:
+            return "impression"
+        return "none"
+
+    def get_effective_group_memory_mode(self) -> str:
+        """
+        解析当前生效的群聊记忆模式：
+        - 仅开启 slots: "slots"
+        - 仅开启 impression: "impression"
+        - 两者皆开启: 根据 group_memory_mode ("slots", "impression", "both") 决定，默认 "slots"
+        - 两者皆关闭: "none"
+        """
+        slots_on = bool(getattr(self, "enable_group_memory_slots", False))
+        imp_on = bool(self.enable_group_impression)
+        if slots_on and imp_on:
+            mode = self.group_memory_mode
+            if mode in ("slots", "impression", "both"):
+                return mode
+            return "slots"
+        elif slots_on:
+            return "slots"
+        elif imp_on:
+            return "impression"
+        return "none"
+
+    def get_group_memory_slots(self, group_id: int) -> str:
+        """获取群专属结构化固定记忆槽位文本（用于 prompt 注入）"""
+        if not getattr(self, "enable_group_memory_slots", False) or not hasattr(self, "memory_slots"):
+            return ""
+        return self.memory_slots.format_group_slots_for_prompt(group_id)
+
+    def clear_group_memory_slots(self, group_id: Optional[int] = None) -> int:
+        """清空群专属结构化固定记忆槽位"""
+        if hasattr(self, "memory_slots"):
+            return self.memory_slots.clear_all_group_slots(group_id)
+        return 0
+
+    def get_recent_speaker_memories(self, group_id: int) -> List[Dict]:
+        """
+        批量读取群内最近 group_reply_impression_count 位发言者的记忆。
+        支持根据用户记忆模式动态返回：
+        - impression 模式: 仅返回主观印象
+        - slots 模式: 仅返回结构化槽位事实
+        - both 模式: 同时返回印象与槽位事实
+        返回: [{"name": str, "user_id": int, "impression": str, "slots": str}, ...]
+        """
+        speakers = self.get_recent_speakers(group_id, limit=self.group_reply_speaker_memory_count)
+        mode = self.get_effective_user_memory_mode()
+        result = []
+        for s in speakers:
+            uid = s.get("user_id")
+            name = s.get("name", str(uid))
+            if uid is None:
+                continue
+
+            entry = {"name": name, "user_id": uid, "impression": "", "slots": ""}
+            has_data = False
+
+            if mode in ("impression", "both"):
+                imp = self.get_impression(uid)
+                if imp:
+                    entry["impression"] = imp
+                    has_data = True
+
+            if mode in ("slots", "both") and self.enable_memory_slots and hasattr(self, "memory_slots"):
+                slots_text = self.memory_slots.format_user_slots_summary(uid)
+                if slots_text:
+                    entry["slots"] = slots_text
+                    has_data = True
+
+            if has_data:
+                result.append(entry)
+        return result
+
+    def get_group_user_session_context(
+        self, group_id: int, user_id: int, max_turns: Optional[int] = None, include_private: Optional[bool] = None
+    ) -> List[Dict]:
+        """
+        获取群聊被 @ 时针对当前用户的上下文历史：
+        群聊不需要让用户单独的对话历史占据过多空间，仅保留少量轮数（默认2-3轮），
+        优先取群内该用户上下文，不足时适度补充最近1-2轮私聊上下文，
+        确保群公屏消息在上下文中有更高占比。
+        """
+        turns = max_turns if max_turns is not None else self.group_user_context_turns
+        inc_priv = include_private if include_private is not None else self.group_include_private_context
+        max_msgs = max(1, turns) * 2
+
+        group_history = self.get_session_history(group_id, user_id)
+        if len(group_history) >= 2:
+            return group_history[-max_msgs:]
+
+        # 若群内该用户历史较少且允许私聊融合
+        if inc_priv:
+            priv_history = self.get_session_history(None, user_id)
+            if priv_history:
+                combined = priv_history[-2:] + group_history
+                return combined[-max_msgs:]
+
+        return group_history[-max_msgs:]
+
     def get_recent_speaker_impressions(self, group_id: int) -> List[Dict]:
         """
         批量读取群内最近 group_reply_impression_count 位发言者的用户印象。
         返回：[{"name": str, "user_id": int, "impression": str}, ...]
         只返回实际有印象记录的成员（跳过空印象）。
         """
-        speakers = self.get_recent_speakers(group_id, limit=self.group_reply_impression_count)
+        speakers = self.get_recent_speakers(group_id, limit=self.group_reply_speaker_memory_count)
         result = []
         for s in speakers:
             uid = s.get("user_id")

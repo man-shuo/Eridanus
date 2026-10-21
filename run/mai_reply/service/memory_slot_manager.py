@@ -132,6 +132,60 @@ DEFAULT_GLOBAL_SLOT_BLUEPRINTS = [
 ]
 
 
+DEFAULT_GROUP_SLOT_BLUEPRINTS = [
+    {
+        "slot_id": 1,
+        "category": "社群定位与核心圈子",
+        "description": "本群核心定位与主题（如游戏开黑/二次元同好/学术考研/技术交流/同城校友/闲聊吹水）、成员整体身份特征",
+    },
+    {
+        "slot_id": 2,
+        "category": "群规底线与敏感禁忌",
+        "description": "群内明文或潜规则禁止的事项、绝对避讳的话题、容易激化群矛盾的雷区与红线",
+    },
+    {
+        "slot_id": 3,
+        "category": "专属黑话与经典名梗",
+        "description": "群内特有黑话暗号、经典历史事件梗、群专属称呼/外号、群友高频口头禅",
+    },
+    {
+        "slot_id": 4,
+        "category": "活跃作息与时段节奏",
+        "description": "群内高频活跃时间规律（如早起打卡/深夜修仙/工作日摸鱼划水/周末集中开黑互动等）",
+    },
+    {
+        "slot_id": 5,
+        "category": "群体气氛与社交基调",
+        "description": "本群整体氛围基调与风格（如欢脱沙雕/严肃硬核/毒舌互损/温和治愈/吵闹日常）",
+    },
+    {
+        "slot_id": 6,
+        "category": "核心人物与成员生态",
+        "description": "群主/管理风格特征、标志性活跃成员角色定位、群内活跃小团体生态与互动关系",
+    },
+    {
+        "slot_id": 7,
+        "category": "常驻热门与高频话题",
+        "description": "群里长期高频讨论的共同喜好或固定话题（特定游戏、某部连载作品、固定兴趣圈等）",
+    },
+    {
+        "slot_id": 8,
+        "category": "重大历史与里程碑大事件",
+        "description": "本群经历过的重大历史事件、大型集体活动、具有纪念意义的转折时刻与大事件",
+    },
+    {
+        "slot_id": 9,
+        "category": "Bot在本群的角色与契约",
+        "description": "Bot在本群被赋予的角色定位（如吉祥物/毒舌吐槽担当/小管家/游戏玩伴）、与本群约定好的专属互动方式或暗号",
+    },
+    {
+        "slot_id": 10,
+        "category": "近期核心焦点与走向",
+        "description": "群内近期正在集中关注、组织或筹备的新事件（如近期新游戏开测、线下聚餐面基、群内比赛等）",
+    },
+]
+
+
 class MemorySlotManager:
     """
     结构化固定记忆槽位管理器
@@ -160,6 +214,8 @@ class MemorySlotManager:
         self.global_slot_count: int = int(ccfg.get("global_memory_slot_count", 10))
         self.user_slot_count: int = int(ccfg.get("user_memory_slot_count", 10))
         self.slot_max_chars: int = int(ccfg.get("memory_slot_max_chars", 120))
+        self.group_slot_count: int = int(ccfg.get("group_memory_slot_count", 10))
+        self.enable_group_slots: bool = ccfg.get("enable_group_memory_slots", True)
         self.cache_ttl: int = int(ccfg.get("impression_ttl", 604800))
 
         # 确保数据库目录存在并建立 SQLite 连接
@@ -264,6 +320,19 @@ class MemorySlotManager:
                     "slot_id": i,
                     "category": f"重要事实记忆{i}",
                     "description": "用户专属重要事实记录",
+                })
+        return bps
+
+    def get_group_blueprints(self) -> List[Dict[str, Any]]:
+        bps = []
+        for i in range(1, self.group_slot_count + 1):
+            if i <= len(DEFAULT_GROUP_SLOT_BLUEPRINTS):
+                bps.append(dict(DEFAULT_GROUP_SLOT_BLUEPRINTS[i - 1]))
+            else:
+                bps.append({
+                    "slot_id": i,
+                    "category": f"群聊特征记忆{i}",
+                    "description": "本群专属重要特征记录",
                 })
         return bps
 
@@ -512,6 +581,132 @@ class MemorySlotManager:
     # 文本格式化与注入
     # --------------------------------------------------------------------------
 
+
+    # --------------------------------------------------------------------------
+    # 群聊社群特征与生态记忆槽位操作 (group_slots)
+    # --------------------------------------------------------------------------
+
+    def get_group_slots(self, group_id: int) -> List[Dict[str, Any]]:
+        if not self.enable:
+            return []
+        return self._get_all_slots("group", str(group_id), self.get_group_blueprints())
+
+    def set_group_slot(
+        self, group_id: int, slot_id: int, content: str, category: Optional[str] = None
+    ) -> bool:
+        if not self.enable:
+            return False
+        slot_id = int(slot_id)
+        if slot_id < 1 or slot_id > self.group_slot_count:
+            logger.warning(f"[MemorySlots] 群槽位超出范围: {slot_id} (有效范围 1..{self.group_slot_count})")
+            return False
+
+        clean_content = content.strip()[:self.slot_max_chars]
+        if not category:
+            bps = self.get_group_blueprints()
+            category = bps[slot_id - 1]["category"] if slot_id <= len(bps) else f"槽位{slot_id}"
+
+        now_ts = int(time.time())
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO memory_slots 
+            (owner_type, owner_id, slot_id, category, content, updated_at)
+            VALUES ('group', ?, ?, ?, ?, ?)
+            """,
+            (str(group_id), slot_id, category, clean_content, now_ts),
+        )
+        self._conn.commit()
+        self._invalidate_cache("group", str(group_id))
+        logger.info(f"[MemorySlots] 群 {group_id} 槽位 {slot_id} [{category}] 写入: {clean_content}")
+        return True
+
+    def clear_group_slot(self, group_id: int, slot_id: int) -> bool:
+        slot_id = int(slot_id)
+        self._conn.execute(
+            "DELETE FROM memory_slots WHERE owner_type = 'group' AND owner_id = ? AND slot_id = ?",
+            (str(group_id), slot_id),
+        )
+        self._conn.commit()
+        self._invalidate_cache("group", str(group_id))
+        logger.info(f"[MemorySlots] 群 {group_id} 槽位 {slot_id} 已清空")
+        return True
+
+    def clear_all_group_slots(self, group_id: Optional[int] = None) -> int:
+        if group_id is not None:
+            cur = self._conn.execute(
+                "DELETE FROM memory_slots WHERE owner_type = 'group' AND owner_id = ?",
+                (str(group_id),),
+            )
+            count = cur.rowcount
+            self._conn.commit()
+            self._invalidate_cache("group", str(group_id))
+            logger.info(f"[MemorySlots] 群 {group_id} 的 {count} 个槽位已全部清空")
+            return count
+        else:
+            cur = self._conn.execute("DELETE FROM memory_slots WHERE owner_type = 'group'")
+            count = cur.rowcount
+            self._conn.commit()
+            logger.info(f"[MemorySlots] 所有群聊的记忆槽位已全部清空，共删除 {count} 条记录")
+            return count
+
+    def format_group_slots_for_prompt(self, group_id: int) -> str:
+        """格式化群专属结构化记忆槽位，注入到群聊回复时的 system prompt"""
+        if not self.enable:
+            return ""
+        slots = self.get_group_slots(group_id)
+        lines = []
+        for s in slots:
+            content = s.get("content", "").strip()
+            if content:
+                cat = s.get("category", "").strip() or f"群槽位{s['slot_id']}"
+                lines.append(f"- [{cat}] {content}")
+        return "\n".join(lines)
+
+    def format_group_slots_for_updater(self, group_id: int) -> str:
+        """格式化给群印象更新器查看的当前 1..10 群槽位现状与规划建议"""
+        slots = self.get_group_slots(group_id)
+        lines = []
+        for s in slots:
+            sid = s["slot_id"]
+            cat = s.get("category", "")
+            content = s.get("content", "").strip()
+            desc = s.get("description", "")
+            val = content if content else "（空）"
+            lines.append(f"槽位{sid} [{cat}]：{val} （槽位规划建议：{desc}）")
+        return "\n".join(lines)
+
+    def format_user_slots_summary(self, user_id: int, max_items: int = 4) -> str:
+        """格式化用户槽位的紧凑单行概要，专供群聊最近发言者画像展示"""
+        if not self.enable:
+            return ""
+        slots = self.get_user_slots(user_id)
+        items = []
+        for s in slots:
+            content = s.get("content", "").strip()
+            if content:
+                cat = s.get("category", "").strip()
+                # 简化常见分类名称以节省空间
+                short_cat = cat.replace("基础个人档案", "档案").replace("深度喜好偏好", "喜好").replace("雷区禁忌点", "禁忌").replace("日常作息规律", "作息").replace("契约约定承诺", "约定")
+                items.append(f"[{short_cat}] {content}")
+                if len(items) >= max_items:
+                    break
+        return "；".join(items)
+
+    def format_group_slots_summary(self, group_id: int, max_items: int = 4) -> str:
+        """格式化群槽位的紧凑单行概要"""
+        if not self.enable:
+            return ""
+        slots = self.get_group_slots(group_id)
+        items = []
+        for s in slots:
+            content = s.get("content", "").strip()
+            if content:
+                cat = s.get("category", "").strip()
+                items.append(f"[{cat}] {content}")
+                if len(items) >= max_items:
+                    break
+        return "；".join(items)
+
     def format_user_slots_for_prompt(self, user_id: int) -> str:
         """格式化用户专属长期事实记忆，注入到回复时的 system prompt"""
         if not self.enable:
@@ -697,6 +892,83 @@ class MemorySlotManager:
                             "slot_id": {
                                 "type": "integer",
                                 "description": f"要清空的记忆槽位编号（1至{self.global_slot_count}）",
+                            },
+                        },
+                        "required": ["slot_id"],
+                    },
+                },
+            },
+        }
+
+        return tools
+
+
+    def build_group_updater_tools(self, group_id: int, group_name: str) -> Dict[str, Any]:
+        """
+        为群聊记忆更新器构造专属 Function Calling 工具字典
+        自动绑定特定 group_id，LLM 仅需提供 slot_id 与 content
+        """
+        manager = self
+
+        async def set_group_memory_slot(slot_id: int, content: str, category: str = "", **kwargs) -> str:
+            try:
+                sid = int(slot_id)
+            except Exception:
+                return f"错误：slot_id 必须为整数数字，收到: {slot_id}"
+            ok = manager.set_group_slot(group_id, sid, content, category)
+            if ok:
+                return f"成功记录群【{group_name}】记忆槽位 {sid} 为: {content}"
+            return f"写入失败，slot_id 须在 1..{manager.group_slot_count} 范围内"
+
+        async def clear_group_memory_slot(slot_id: int, **kwargs) -> str:
+            try:
+                sid = int(slot_id)
+            except Exception:
+                return f"错误：slot_id 必须为整数数字，收到: {slot_id}"
+            manager.clear_group_slot(group_id, sid)
+            return f"成功清空群【{group_name}】记忆槽位 {sid}"
+
+        tools = {
+            "set_group_memory_slot": {
+                "func": set_group_memory_slot,
+                "declaration": {
+                    "name": "set_group_memory_slot",
+                    "description": (
+                        f"记录或更新群【{group_name}】的结构化社群生态与特征记忆槽位（1至{self.group_slot_count}）。"
+                        "用于沉淀该群的核心定位/社群圈子、群规底线/禁忌、专属黑话名梗、活跃作息、群氛围风格、核心人物生态、热门话题、重大历史与Bot在本群的角色。"
+                        "单条记忆内容务必精炼客观（建议30-80字）。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slot_id": {
+                                "type": "integer",
+                                "description": f"记忆槽位编号（1至{self.group_slot_count}）",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "客观社群记忆内容（简短精炼，建议30-80字）",
+                            },
+                            "category": {
+                                "type": "string",
+                                "description": "记忆分类标签（可选，留空则使用默认群蓝图规划）",
+                            },
+                        },
+                        "required": ["slot_id", "content"],
+                    },
+                },
+            },
+            "clear_group_memory_slot": {
+                "func": clear_group_memory_slot,
+                "declaration": {
+                    "name": "clear_group_memory_slot",
+                    "description": f"清空群【{group_name}】某个过期失效的记忆槽位（1至{self.group_slot_count}）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slot_id": {
+                                "type": "integer",
+                                "description": f"要清空的群记忆槽位编号（1至{self.group_slot_count}）",
                             },
                         },
                         "required": ["slot_id"],

@@ -63,6 +63,36 @@ MEMORY_SLOT_EXTRACT_PROMPT_TEMPLATE = """你是一个严谨客观的事实与记
 """
 
 # 阶段2：增量更新主观印象：融合旧印象与新对话
+GROUP_MEMORY_SLOT_EXTRACT_PROMPT_TEMPLATE = """你是一个严谨客观的社群生态与群聊记忆分析专家。你的唯一职责是审查群聊记录，提取群【{group_name}】的社群特征与客观事实，并调用工具写入对应的群记忆槽位（1-10）。
+
+【群【{group_name}】最新公屏聊天片段】：
+{window_text}
+
+---
+【群【{group_name}】当前的固定特征与生态槽位（1-10）】：
+{group_slots_text}
+
+---
+【10个群记忆槽位蓝图与分类规划】：
+- 槽位1 [社群定位与核心圈子]：本群核心定位与主题（如游戏开黑/二次元同好/学术考研/技术交流/同城校友/闲聊吹水）、成员整体身份特征
+- 槽位2 [群规底线与敏感禁忌]：群内明文或潜规则禁止的事项、绝对避讳的话题、容易激化群矛盾的雷区与红线
+- 槽位3 [专属黑话与经典名梗]：群内特有黑话暗号、经典历史事件梗、群专属称呼/外号、群友高频口头禅
+- 槽位4 [活跃作息与时段节奏]：群内高频活跃时间规律（如早起打卡/深夜修仙/工作日摸鱼划水/周末集中开黑互动等）
+- 槽位5 [群体气氛与社交基调]：本群整体氛围基调与风格（如欢脱沙雕/严肃硬核/毒舌互损/温和治愈/吵闹日常）
+- 槽位6 [核心人物与成员生态]：群主/管理风格特征、标志性活跃成员角色定位、群内活跃小团体生态与互动关系
+- 槽位7 [常驻热门与高频话题]：群里长期高频讨论的共同喜好或固定话题（特定游戏、某部连载作品、固定兴趣圈等）
+- 槽位8 [重大历史与里程碑大事件]：本群经历过的重大历史事件、大型集体活动、具有纪念意义的转折时刻与大事件
+- 槽位9 [Bot在本群的角色与契约]：Bot在本群被赋予的角色定位（如吉祥物/毒舌吐槽担当/小管家/游戏玩伴）、与本群约定好的专属互动方式或暗号
+- 槽位10 [近期核心焦点与走向]：群内近期正在集中关注、组织或筹备的新事件（如近期新游戏开测、线下聚餐面基、群内比赛等）
+
+---
+【执行指令】：
+1. 仔细阅读最新群聊片段。如果发现涉及本群社群特征、专属黑话名梗、群规雷区、热门话题、近期大事件或Bot在本群角色的客观事实，必须调用工具 set_group_memory_slot(slot_id, content) 写入或更新对应槽位！
+   - 内容要求：纯客观、事实化、精炼准确（建议30-80字），突出群集体特征与事实。切勿个人化臆断或空洞抒情！
+2. 如果旧槽位信息被明确更正或失效，调用更新覆盖或调用 clear_group_memory_slot(slot_id) 清空。
+3. 如果审查后确认本轮群聊片段完全没有任何新的社群特征或群维度事实需要沉淀，不要调用工具，直接回复【无事实更新】。
+"""
+
 SUMMARY_PROMPT_TEMPLATE = """你（{bot_name}）和 {user_name} 的最新对话：
 
 {history_text}
@@ -178,12 +208,21 @@ class ImpressionUpdater:
 
         self.max_chars = int(ccfg.get("impression_max_chars", IMPRESSION_MAX_CHARS))
         # 用户印象更新轮数（优先读 user_trigger_turns，兼容 impression_trigger_turns）
-        self.user_imp_trigger: int = int(
+        # 用户记忆（槽位/印象通用）更新间隔
+        self.user_memory_trigger: int = int(
             ccfg.get("user_trigger_turns")
             or ccfg.get("impression_trigger_turns")
             or SUMMARY_TRIGGER_TURNS
         )
-        self.group_imp_trigger: int = int(ccfg.get("group_trigger_msgs", GROUP_IMP_TRIGGER_MSGS))
+        self.user_imp_trigger: int = self.user_memory_trigger
+
+        # 群聊记忆（群生态槽位/群印象通用）更新间隔，统一支持 group_trigger_messages
+        self.group_memory_trigger: int = int(
+            ccfg.get("group_trigger_messages")
+            or ccfg.get("group_trigger_msgs")
+            or GROUP_IMP_TRIGGER_MSGS
+        )
+        self.group_imp_trigger: int = self.group_memory_trigger
         self.group_imp_max_chars: int = int(ccfg.get("group_max_chars", GROUP_IMP_MAX_CHARS))
 
         self.enable_group_impression: bool = ccfg.get(
@@ -196,8 +235,13 @@ class ImpressionUpdater:
         self.group_impression_whitelist: list = [
             int(x) for x in ccfg.get("group_impression_whitelist", []) if str(x).isdigit()
         ]
-        # 构建回复时，最多读取最近 N 位发言者的 impression
-        self.group_reply_impression_count: int = ccfg.get("group_reply_impression_count", 3)
+        # 群聊回复时读取最近 N 位发言者的记忆（通用支持槽位事实与主观印象）
+        self.group_reply_speaker_memory_count: int = int(
+            ccfg.get("group_reply_speaker_memory_count")
+            or ccfg.get("group_reply_impression_count")
+            or 3
+        )
+        self.group_reply_impression_count: int = self.group_reply_speaker_memory_count
 
     def is_group_impression_enabled(self, group_id) -> bool:
         """
@@ -209,7 +253,9 @@ class ImpressionUpdater:
         3. 若 group_impression_whitelist_enabled 为 False（全局模式）：
            - 对所有群使用群聊印象。
         """
-        if not self.enable_group_impression:
+        # 只要群印象或群记忆槽位任一启用，即允许进行群记忆跟踪
+        group_mode = self._ctx.get_effective_group_memory_mode() if hasattr(self._ctx, "get_effective_group_memory_mode") else ("slots" if self.enable_group_impression else "none")
+        if group_mode == "none":
             return False
 
         if not group_id:
@@ -430,6 +476,140 @@ class ImpressionUpdater:
             traceback.print_exc()
             logger.error(f"[MaiReply] 记忆槽位事实提取失败: {e}")
 
+
+    def _parse_and_apply_fallback_group_slots(self, text: str, group_id: int, group_name: str) -> bool:
+        """
+        容错解析器：当模型未走原生 tool_calls 时，从回复文本解析群记忆槽位
+        """
+        if not text or not text.strip() or "无事实更新" in text:
+            return False
+
+        applied = False
+
+        # 1. 提取 XML/函数标记
+        xml_matches = re.finditer(r'(?:<tool_call>|<function=(?P<fn>[\w_]+)>)(.*?)(?:</tool_call>|</function>)', text, re.DOTALL)
+        for xm in xml_matches:
+            payload_str = (xm.group(2) or "").strip()
+            try:
+                d = json.loads(payload_str)
+                sid = d.get("slot_id") or (d.get("parameters", {}).get("slot_id") if isinstance(d.get("parameters"), dict) else None)
+                cnt = d.get("content") or (d.get("parameters", {}).get("content") if isinstance(d.get("parameters"), dict) else "")
+                if sid is not None and cnt:
+                    self._ctx.memory_slots.set_group_slot(group_id, int(sid), str(cnt).strip())
+                    applied = True
+                    logger.info(f"[GroupMemorySlots 容错解析] 成功从XML写入群 {group_id} 槽位: {sid} -> {cnt}")
+            except Exception:
+                pass
+
+        # 2. 提取 Markdown 代码块中的 JSON 或原生 JSON
+        candidates = list(re.findall(r"`(?:json)?\s*([{\[].*?[}\]])\s*`", text, re.DOTALL))
+        candidates.extend(re.findall(r'(\{[^{}]*?"slot_id"[^{}]*?\})', text, re.DOTALL))
+        if not candidates:
+            candidates = [text.strip()]
+
+        for block in candidates:
+            try:
+                data = json.loads(block.strip())
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if isinstance(item, dict):
+                        sid = item.get("slot_id")
+                        content = item.get("content")
+                        tool_name = str(item.get("tool", "") or item.get("name", "") or item.get("action", ""))
+                        if sid is not None:
+                            sid_int = int(sid)
+                            if "clear" in tool_name:
+                                self._ctx.memory_slots.clear_group_slot(group_id, sid_int)
+                                applied = True
+                                logger.info(f"[GroupMemorySlots 容错解析] 成功清空群槽位: {group_id} -> {sid_int}")
+                            elif content:
+                                self._ctx.memory_slots.set_group_slot(group_id, sid_int, str(content).strip())
+                                applied = True
+                                logger.info(f"[GroupMemorySlots 容错解析] 成功写入群槽位: {group_id} -> {sid_int}: {content}")
+            except Exception:
+                pass
+
+        # 3. 匹配函数调用形式：set_group_memory_slot(...)
+        func_matches = re.finditer(
+            r'(?P<fn>set_group_memory_slot|clear_group_memory_slot)\s*\((.*?)\)',
+            text,
+            re.DOTALL
+        )
+        for m in func_matches:
+            full_fn = m.group("fn")
+            args_str = m.group(2)
+            sid_m = re.search(r'(?:slot_id\s*=\s*)?(\d+)', args_str)
+            cnt_m = re.search(r"""(?:content\s*=\s*)?["'](.*?)["'](?:\s*[,)]|\s*$)""", args_str, re.DOTALL)
+            if sid_m:
+                try:
+                    sid = int(sid_m.group(1))
+                    cnt = cnt_m.group(1).strip() if cnt_m else ""
+                    if "clear" in full_fn:
+                        self._ctx.memory_slots.clear_group_slot(group_id, sid)
+                        applied = True
+                        logger.info(f"[GroupMemorySlots 容错解析] 成功清空群槽位: {full_fn}({sid})")
+                    elif cnt:
+                        self._ctx.memory_slots.set_group_slot(group_id, sid, cnt)
+                        applied = True
+                        logger.info(f"[GroupMemorySlots 容错解析] 成功写入群槽位: {full_fn}({sid}, {cnt})")
+                except Exception:
+                    pass
+
+        return applied
+
+    async def _extract_and_update_group_slots(
+        self, group_id: int, group_name: str, window_text: str
+    ) -> None:
+        """群聊记忆槽位更新阶段：使用专属 Tool Calling 抽取社群特征事实并维护群固定槽位"""
+        try:
+            if not hasattr(self._ctx, "memory_slots") or not getattr(self._ctx, "enable_group_memory_slots", False):
+                return
+
+            tools = self._ctx.memory_slots.build_group_updater_tools(group_id, group_name)
+            group_slots_text = self._ctx.memory_slots.format_group_slots_for_updater(group_id)
+
+            prompt = GROUP_MEMORY_SLOT_EXTRACT_PROMPT_TEMPLATE.format(
+                group_name=group_name,
+                window_text=window_text,
+                group_slots_text=group_slots_text,
+            )
+
+            executed_calls = []
+            wrapped_tools = {}
+            for tname, tdict in tools.items():
+                orig_func = tdict["func"]
+                decl = tdict["declaration"]
+
+                def _bind(name, func):
+                    async def wrapper(*args, **kwargs):
+                        executed_calls.append((name, kwargs))
+                        return await func(*args, **kwargs)
+                    wrapper.__doc__ = func.__doc__
+                    return wrapper
+
+                wrapped_tools[tname] = {
+                    "func": _bind(tname, orig_func),
+                    "declaration": decl,
+                }
+
+            result_text = await self._call_llm(
+                prompt,
+                tools=wrapped_tools,
+                system_prompt="你是一个严谨客观的群聊社群特征分析专家，负责提取社群硬事实并更新群记忆槽位。切忌个人化抒情。",
+            )
+
+            if executed_calls:
+                logger.info(f"[MaiReply] 群【{group_name}】记忆槽位更新完成，触发 {len(executed_calls)} 次工具调用: {[c[0] for c in executed_calls]}")
+            else:
+                if result_text:
+                    parsed = self._parse_and_apply_fallback_group_slots(result_text, group_id, group_name)
+                    if not parsed and "无事实更新" not in result_text:
+                        logger.debug(f"[MaiReply] 群槽位分析无事实更新或未触发工具: {result_text[:60]}")
+        except Exception as e:
+            traceback.print_exc()
+            logger.error(f"[MaiReply] 群记忆槽位事实提取失败: {e}")
+
+
     # ------------------------------------------------------------------ 用户印象
 
     def tick(self, user_id: int, group_id, user_name: str, bot_name: str) -> None:
@@ -461,50 +641,49 @@ class ImpressionUpdater:
                 lines.append(f"{role}：{content}")
             history_text = "\n".join(lines)
 
-            old_impression = self._ctx.get_impression(user_id) or ""
-
-            enable_slots = getattr(self._ctx, "enable_memory_slots", False) and hasattr(self._ctx, "memory_slots")
+            user_mode = self._ctx.get_effective_user_memory_mode() if hasattr(self._ctx, "get_effective_user_memory_mode") else "slots"
+            if user_mode == "none":
+                return
 
             # 阶段 1：独立提取客观硬事实并更新记忆槽位
-            if enable_slots:
+            if user_mode in ("slots", "both"):
                 await self._extract_and_update_memory_slots(
                     user_id=user_id,
                     user_name=user_name,
                     history_text=history_text,
                 )
 
-            # 阶段 2：生成第一人称主观情感印象
-            prompt = SUMMARY_PROMPT_TEMPLATE.format(
-                bot_name=bot_name,
-                user_name=user_name,
-                history_text=history_text,
-                old_impression=old_impression or "（暂无，第一次聊）",
-                chars=self.max_chars,
-            )
-
-            new_impression = await self._call_llm(
-                prompt,
-                system_prompt="你是一个情感记忆提取器，帮助机器人记住并压缩对他人的主观印象。不加任何前缀。"
-            )
-            if not new_impression:
-                return
-
-            new_impression = new_impression.strip()
-
-            if len(new_impression) > self.max_chars:
-                compress_prompt = COMPRESS_PROMPT_TEMPLATE.format(
+            # 阶段 2：生成第一人称主观情感印象（仅在模式包含 impression 时执行，彻底杜绝浪费 API）
+            if user_mode in ("impression", "both"):
+                old_impression = self._ctx.get_impression(user_id) or ""
+                prompt = SUMMARY_PROMPT_TEMPLATE.format(
                     bot_name=bot_name,
                     user_name=user_name,
-                    char_count=len(new_impression),
-                    old_impression=new_impression,
-                    chars=self.max_chars
+                    history_text=history_text,
+                    old_impression=old_impression or "（暂无，第一次聊）",
+                    chars=self.max_chars,
                 )
-                compressed = await self._call_llm(compress_prompt)
-                if compressed and compressed.strip():
-                    new_impression = compressed.strip()
 
-            self._ctx.update_impression(user_id, new_impression)
-            logger.info(f"[MaiReply] 已更新对 {user_name}({user_id}) 的印象({len(new_impression)}字): {new_impression}")
+                new_impression = await self._call_llm(
+                    prompt,
+                    system_prompt="你是一个情感记忆提取器，帮助机器人记住并压缩对他人的主观印象。不加任何前缀。"
+                )
+                if new_impression:
+                    new_impression = new_impression.strip()
+                    if len(new_impression) > self.max_chars:
+                        compress_prompt = COMPRESS_PROMPT_TEMPLATE.format(
+                            bot_name=bot_name,
+                            user_name=user_name,
+                            char_count=len(new_impression),
+                            old_impression=new_impression,
+                            chars=self.max_chars
+                        )
+                        compressed = await self._call_llm(compress_prompt)
+                        if compressed and compressed.strip():
+                            new_impression = compressed.strip()
+
+                    self._ctx.update_impression(user_id, new_impression)
+                    logger.info(f"[MaiReply] 已更新对 {user_name}({user_id}) 的印象({len(new_impression)}字): {new_impression}")
 
         except Exception as e:
             traceback.print_exc()
@@ -547,38 +726,48 @@ class ImpressionUpdater:
                 lines.append(f"{sender_label}：{text}")
             window_text = "\n".join(lines)
 
-            old_impression = self._ctx.get_group_impression(group_id) or ""
-
-            prompt = GROUP_IMP_PROMPT_TEMPLATE.format(
-                bot_name=bot_name,
-                group_name=group_name,
-                window_text=window_text,
-                old_impression=old_impression or "（暂无，刚开始旁观这个群）",
-                chars=self.group_imp_max_chars
-            )
-            new_impression = await self._call_llm(prompt)
-            if not new_impression:
+            group_mode = self._ctx.get_effective_group_memory_mode() if hasattr(self._ctx, "get_effective_group_memory_mode") else "slots"
+            if group_mode == "none":
                 return
 
-            new_impression = new_impression.strip()
+            # 阶段 1：群聊结构化记忆槽位提取 (group_slots)
+            if group_mode in ("slots", "both"):
+                await self._extract_and_update_group_slots(
+                    group_id=group_id,
+                    group_name=group_name,
+                    window_text=window_text,
+                )
 
-            if len(new_impression) > self.group_imp_max_chars:
-                compress_prompt = GROUP_IMP_COMPRESS_TEMPLATE.format(
+            # 阶段 2：生成群聊整体主观气氛印象（若仅启用 slots 则跳过，彻底避免 API 资源浪费）
+            if group_mode in ("impression", "both"):
+                old_impression = self._ctx.get_group_impression(group_id) or ""
+                prompt = GROUP_IMP_PROMPT_TEMPLATE.format(
                     bot_name=bot_name,
                     group_name=group_name,
-                    char_count=len(new_impression),
-                    old_impression=new_impression,
+                    window_text=window_text,
+                    old_impression=old_impression or "（暂无，刚开始旁观这个群）",
                     chars=self.group_imp_max_chars
                 )
-                compressed = await self._call_llm(compress_prompt)
-                if compressed and compressed.strip():
-                    new_impression = compressed.strip()
+                new_impression = await self._call_llm(prompt)
+                if new_impression:
+                    new_impression = new_impression.strip()
+                    if len(new_impression) > self.group_imp_max_chars:
+                        compress_prompt = GROUP_IMP_COMPRESS_TEMPLATE.format(
+                            bot_name=bot_name,
+                            group_name=group_name,
+                            char_count=len(new_impression),
+                            old_impression=new_impression,
+                            chars=self.group_imp_max_chars
+                        )
+                        compressed = await self._call_llm(compress_prompt)
+                        if compressed and compressed.strip():
+                            new_impression = compressed.strip()
 
-            self._ctx.update_group_impression(group_id, new_impression)
-            logger.info(
-                f"[MaiReply] 已更新群 {group_name}({group_id}) 的印象"
-                f"({len(new_impression)}字): {new_impression[:80]}..."
-            )
+                    self._ctx.update_group_impression(group_id, new_impression)
+                    logger.info(
+                        f"[MaiReply] 已更新群 {group_name}({group_id}) 的印象"
+                        f"({len(new_impression)}字): {new_impression[:80]}..."
+                    )
 
         except Exception as e:
             traceback.print_exc()

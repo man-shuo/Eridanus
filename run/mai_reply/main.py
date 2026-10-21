@@ -275,6 +275,7 @@ def main(bot: ExtendBot, config: YAMLManager):
             if is_group:
                 engine.context.clear_all_group_windows(group_id)
                 engine.context.clear_group_impression(group_id)
+                engine.context.clear_group_memory_slots(group_id)
                 await bot.send(event, f"已清除本群 {count} 个用户的对话记录及群印象～")
             else:
                 await bot.send(event, f"已清除全部 {count} 个会话记录～")
@@ -366,6 +367,44 @@ def main(bot: ExtendBot, config: YAMLManager):
             engine.context.clear_global_memory()
             await bot.send(event, "已清空Bot全局生活与经历记忆～")
             return True
+
+                # ─── 群生态记忆槽位与群印象指令 ───
+        show_group_mem_aliases = ("/showgroupmemory", "/查看群记忆", "查看群记忆", "#查看群记忆")
+        for command in show_group_mem_aliases:
+            if command_matches(text, command, has_target_at):
+                target_gid = parse_clear_target(event, command) or (group_id if is_group else None)
+                if not target_gid:
+                    await bot.send(event, "请在群内使用该命令，或提供群号：/showgroupmemory [群号]")
+                    return True
+                slots_text = engine.context.get_group_memory_slots(target_gid)
+                imp_text = engine.context.get_group_impression(target_gid)
+                parts = []
+                if slots_text:
+                    parts.append(f"【群 {target_gid} 专属生态槽位记忆（10个槽位）】：\n{slots_text}")
+                if imp_text:
+                    parts.append(f"【群 {target_gid} 整体主观印象】：\n{imp_text}")
+                if not parts:
+                    await bot.send(event, f"目前尚未记录群 {target_gid} 的专属生态记忆或群印象。")
+                else:
+                    await bot.send(event, "\n\n".join(parts))
+                return True
+
+        clear_group_mem_aliases = ("/cleargroupmemory", "/清空群记忆", "清空群记忆", "#清空群记忆")
+        for command in clear_group_mem_aliases:
+            if command_matches(text, command, has_target_at):
+                target_gid = parse_clear_target(event, command) or (group_id if is_group else None)
+                if not target_gid:
+                    await bot.send(event, "请在群内使用该命令，或提供群号：/cleargroupmemory [群号]")
+                    return True
+                sender_role = getattr(event, "permission", None) or getattr(getattr(event, "sender", None), "role", None)
+                is_admin = sender_role in ("ADMINISTRATOR", "OWNER", "admin", "owner")
+                if not is_master(event.user_id) and not is_admin:
+                    await bot.send(event, "只有管理员或主人可以清空群记忆哦。")
+                    return True
+                slot_cnt = engine.context.clear_group_memory_slots(target_gid)
+                engine.context.clear_group_impression(target_gid)
+                await bot.send(event, f"已清空群 {target_gid} 的生态槽位记忆（共 {slot_cnt} 个）及群整体印象。")
+                return True
 
         return False
 

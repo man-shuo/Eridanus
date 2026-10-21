@@ -274,19 +274,37 @@ class ReplyEngine:
                 # 传入 user_id 以便发言者追踪
                 self.context.push_group_window(group_id, user_name, final_text, user_id=user_id)
 
-            history = self.context.get_session_history(group_id, user_id)
+            # 提取历史对话上下文：群聊被@时精简提取少量私聊/群聊上下文（默认2-3轮），把宝贵窗口留给群公屏
+            max_turns = self.cfg.mai_reply.config.get("context", {}).get("max_turns", 20)
+            max_history_msgs = max_turns * 2
+
+            if is_group:
+                trimmed_history = self.context.get_group_user_session_context(group_id, user_id)
+            else:
+                history = self.context.get_session_history(group_id, user_id)
+                trimmed_history = history[-max_history_msgs:] if len(history) > max_history_msgs else list(history)
+
             group_context = ""
             if is_group:
                 group_context = self.context.build_group_context_snippet(group_id, bot_name)
 
-            user_impression = self.context.get_impression(user_id)
+            # 内存模式感知：按配置动态读取用户记忆（slots / impression / both）
+            user_mem_mode = self.context.get_effective_user_memory_mode() if hasattr(self.context, "get_effective_user_memory_mode") else "slots"
+            user_impression = self.context.get_impression(user_id) if user_mem_mode in ("impression", "both") else ""
+            user_memory = self.context.get_user_memory(user_id) if user_mem_mode in ("slots", "both") else ""
 
-            # ---- 群聊专属：气氛印象 + 最近发言者印象 ----
+            # 群聊专属记忆：群聊生态特征槽位(group_slots)与群整体主观印象(group_impression)，及最近发言者记忆
             group_impression = ""
-            recent_speaker_impressions = []
+            group_slots = ""
+            recent_speaker_memories = []
             if is_group and group_id:
-                group_impression = self.context.get_group_impression(group_id)
-                recent_speaker_impressions = self.context.get_recent_speaker_impressions(group_id)
+                group_mem_mode = self.context.get_effective_group_memory_mode() if hasattr(self.context, "get_effective_group_memory_mode") else "slots"
+                if group_mem_mode in ("impression", "both"):
+                    group_impression = self.context.get_group_impression(group_id)
+                if group_mem_mode in ("slots", "both"):
+                    group_slots = self.context.get_group_memory_slots(group_id)
+
+                recent_speaker_memories = self.context.get_recent_speaker_memories(group_id)
 
             group_name = await self._get_group_name(bot, group_id) if is_group else "私聊"
             system_prompt = self.prompt_builder.build_system_prompt(
@@ -298,17 +316,14 @@ class ReplyEngine:
                 is_group=is_group,
                 triggered_by_llm=triggered_by_llm,
                 group_impression=group_impression,
-                recent_speaker_impressions=recent_speaker_impressions,
+                recent_speaker_memories=recent_speaker_memories,
                 user_text=final_text,
                 global_memory=self.context.get_global_memory(),
-                user_memory=self.context.get_user_memory(user_id),
+                user_memory=user_memory,
+                group_slots=group_slots,
             )
             if system_prompt_prefix:
                 system_prompt = f"{system_prompt_prefix.strip()}\n\n{system_prompt}"
-
-            max_turns = self.cfg.mai_reply.config.get("context", {}).get("max_turns", 20)
-            max_history_msgs = max_turns * 2
-            trimmed_history = history[-max_history_msgs:] if len(history) > max_history_msgs else list(history)
 
             messages = trimmed_history
             user_content = multimodal_content if multimodal_content is not None else clean_text

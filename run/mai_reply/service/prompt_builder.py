@@ -135,198 +135,120 @@ class PromptBuilder:
 
 
     def build_system_prompt(
-
         self,
-
         bot_name: str,
-
         user_name: str,
-
         group_name: str = "私聊",
-
         group_context_snippet: str = "",
-
         user_impression: str = "",
-
-        # 新增参数
-
+        # 群聊相关
         is_group: bool = False,
-
         triggered_by_llm: bool = False,
-
         group_impression: str = "",
-
         recent_speaker_impressions: Optional[List[Dict]] = None,
-
         user_text: str = "",
-
         global_memory: str = "",
-
         user_memory: str = "",
-
+        group_slots: str = "",
+        recent_speaker_memories: Optional[List[Dict]] = None,
     ) -> str:
-
         """
+        构建最终的 system prompt。
 
-        构建完整 system prompt。
-
-
-
-        新增参数说明：
-
+        参数说明：
         - is_group: 是否群聊场景
-
-        - triggered_by_llm: 是否由 trigger_llm 触发（而非@/前缀），触发时追加严格字数约束
-
-        - group_impression: 对这个群的整体气氛/话题印象
-
-        - recent_speaker_impressions: 最近发言者的印象列表，
-
-          格式 [{"name": str, "user_id": int, "impression": str}, ...]
-
+        - triggered_by_llm: 是否由 trigger_llm 判定触发（非@/前缀触发，此时追加更严格的约束）
+        - group_impression: 你关于群聊的整体氛围/主观印象
+        - group_slots: 本群专属的10个结构化特征槽位（社群定位、群规禁忌、黑话名梗等）
+        - recent_speaker_impressions: 最近发言者的印象列表（向后兼容）
+        - recent_speaker_memories: 最近发言者的记忆列表（支持槽位特征或主观印象）
         """
-
         if self._chara_content:
-
             base = self._chara_content
-
         else:
-
             base = self._system_template
 
-
-
         now = datetime.now()
-
         time_str = now.strftime("%Y年%m月%d日 %H:%M")
-
         weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-
         time_str += f" {weekdays[now.weekday()]}"
-
-
 
         mood = self.emotion.get_mood()
 
-
-
         prompt = base.replace("{","{{").replace("}","}}").format(
-
             bot_name=bot_name,
-
             用户=user_name,
-
             time=time_str,
-
             mood=mood,
-
             group_name=group_name,
-
         )
 
-
-
         if group_context_snippet:
-
             prompt += f"\n\n{group_context_snippet}"
 
-
-
-        # ---- 群聊整体气氛印象 ----
-
-        if is_group and group_impression:
-
-            prompt += f"\n\n【你对「{group_name}」这个群的整体印象】\n{group_impression}"
-
-
-
-        # ---- 最近发言者的个人印象（群聊专用）----
-
-        if is_group and recent_speaker_impressions:
-
+        # ---- 最近发言者的记忆与槽位特征（群聊专属，让群交互认知更全面） ----
+        speakers = recent_speaker_memories or recent_speaker_impressions
+        if is_group and speakers:
             lines = []
-
-            for item in recent_speaker_impressions:
-
+            for item in speakers:
                 name = item.get("name", "?")
-
                 imp = item.get("impression", "")
-
-                if imp:
-
+                slots = item.get("slots", "")
+                if slots and imp:
+                    lines.append(f"- {name}：[槽位特征] {slots} | [主观态度] {imp}")
+                elif slots:
+                    lines.append(f"- {name}：{slots}")
+                elif imp:
                     lines.append(f"- {name}：{imp}")
-
             if lines:
-
                 prompt += (
-
-                    f"\n\n【你对群里最近几位发言者的主观印象】\n"
-
+                    f"\n\n【你在群里关注的最近几位发言者的记忆/槽位印象】：\n"
                     + "\n".join(lines)
-
-                    + "\n（回复时请根据以上印象自然地调整对不同人的语气和态度）"
-
+                    + "\n（回复时结合这些记忆自然回应当事人或被提及的人，体现对不同群友的专属认知）"
                 )
 
+        # ---- 群聊专属结构化固定特征与生态槽位 (group_slots) ----
+        if is_group and group_slots:
+            prompt += (
+                f"\n\n【关于群「{group_name}」的固定特征与社群生态记忆（10个槽位）】：\n"
+                f"{group_slots}\n"
+                f"（请时刻遵循本群定位、黑话名梗、规矩禁忌以及你在此群的角色定位）"
+            )
 
+        # ---- 群聊整体氛围印象 (group_impression) ----
+        if is_group and group_impression:
+            prompt += f"\n\n【你对「{group_name}」整个群的整体氛围与印象】：\n{group_impression}"
 
-        # ---- Bot 全局独立生活与人生记忆层（掌管生活状态、独立经历与空间动态）----
-
+        # ---- Bot 全局多维自我记忆与经验（涵盖生活状态、人际网络与空间动态） ----
         if global_memory:
-
             prompt += (
-
-                f"\n\n【你的全局生活记录与独立近况（Bot自身人生经历层）】\n"
-
+                f"\n\n【你的全局生活记录与真实世界经验（Bot专属自我记忆层）】：\n"
                 f"{global_memory}\n"
-
-                f"（核心人设立足点：你拥有自己独立的生活轨迹、日常作息、兴趣心境与QQ空间动态。你不是围着用户打转的附庸，而是一个有独立生活和真实呼吸感的人！"
-
-                f"当对话中涉及日常生活、近况状态或空间动态时，自然地结合上述经历聊起、调侃或分享感受，展现你真实的独立性与生活感）"
-
+                f"（这是你的自我记忆：你拥有属于自己的生活轨迹、日常作息、感兴趣的经历与QQ空间动态。你不是围着用户打转的工具人，而是一个有独立生活的真实存在的人。"
+                f"在对话涉及日常生活、生活状态、空间动态时，自然地结合这些记忆分享、吐槽或互动，展现真实的多维生活细节）"
             )
 
-
-
-        # ---- 用户专属长期硬事实记忆（10条固定槽位）----
-
+        # ---- 用户专属长期硬事实记忆（10个固定槽位） ----
         if user_memory:
-
             prompt += (
-
-                f"\n\n【你对 {user_name} 的长期事实记忆（深度个人档案）】\n"
-
+                f"\n\n【关于 {user_name} 的长期事实记忆（确凿客观的特征与画像）】：\n"
                 f"{user_memory}\n"
-
-                f"（核心记忆认知：这些是关于TA的真实确定事实、时差时区、城市、喜好禁忌、作息与过往约定！"
-
-                f"在对话中请时刻记住并自然体现出这些默契（例如若有时差要敏锐感知对方此刻是深更半夜还是清晨白天，牢记对方的偏好与约定），"
-
-                f"不要机械背诵，而是像真正懂TA、一直把TA放在心上的老友/伴侣一样自然流露，让TA切实感受到你真的记住了发生过的事情）"
-
+                f"（这是你的记忆认知：这些是关于TA的真实确凿事实，随时可能在闲聊中派上用场。信息应当内化为你的认知，"
+                f"在对话中自然体现出这些默契（如在深夜时体谅对方作息、记住对方的喜好与约定），"
+                f"不要机械念经，但在合适时机自然流露出你确实记得这些细节）"
             )
 
-
-
-        # ---- 当前触发用户的印象 ----
-
+        # ---- 当前交互对象的主观印象 ----
         if user_impression:
-
             prompt += (
-
-                f"\n\n【你对 {user_name} 的主观印象与态度】\n{user_impression}\n"
-
-                f"（重要：请务必根据以上印象，动态调整你此刻对TA的说话语气！如果印象好就亲昵，如果印象差就冷淡甚至回怼！）"
-
+                f"\n\n【你对 {user_name} 的主观印象与态度】：\n{user_impression}\n"
+                f"（不要向对方复述这些印象，动态调整你此刻对TA说话的语气。印记随时间会变淡，不必拘泥）"
             )
-
-        else:
-
-            prompt += f"\n\n【你对 {user_name} 的主观印象与态度】\n你们还不算太熟，按你正常的心情回应即可。"
-
-
+        elif not user_memory:
+            prompt += f"\n\n【你对 {user_name} 的主观印象与态度】：\n你们还不太熟，保持基本的礼貌与相应分寸。"
 
         # ---- 群聊人际边界约束 ----
+
 
         if is_group:
 
