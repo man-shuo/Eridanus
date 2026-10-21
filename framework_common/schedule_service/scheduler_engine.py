@@ -43,7 +43,7 @@ class ScheduledTask:
     target_type: str  # "private" or "group"
     target_id: int    # user_id or group_id
     task_type: str    # "reminder", "wake_up", "asmr", "proactive_chat", "tool_call", "custom"
-    recur_type: str   # "once", "daily", "weekly", "workday", "weekend"
+    recur_type: str   # "once", "daily", "weekly", "workday", "weekend", "yearly", "interval"
     weekdays: Optional[str]  # e.g. "0,2,4" (0=Monday, 6=Sunday)
     time_str: str     # e.g. "08:30" or "2026-10-12 09:00:00"
     target_city: str
@@ -178,6 +178,57 @@ class DynamicScheduler:
         logger.info(f"[DynamicScheduler] 定时任务持久化引擎已就绪: {db_path}")
 
     # -------------------------------------------------------------------------
+    @staticmethod
+    def is_system_task(task: "ScheduledTask") -> bool:
+        """判断是否为代码或配置层面的系统后台常驻守护任务（如 QQ 空间巡检、保活等）"""
+        tt = (task.task_type or "").lower()
+        tid = (task.task_id or "").lower()
+        return (
+            tt.startswith("qzone_")
+            or tid.startswith("qzone_")
+            or tt.startswith("system_")
+            or tid.startswith("system_")
+        )
+
+    @classmethod
+    def parse_yearly_date(cls, time_str: str) -> Tuple[int, int, int, int]:
+        """
+        从时间字符串中解析出年度循环任务的 (month, day, hour, minute)
+        支持格式例如：
+        - "2026-10-24 08:30" / "2026/10/24 08:30"
+        - "10-24 08:30" / "10/24 08:30" / "10.24 08:30"
+        - "10月24日 8点30分" / "10月24号 8:30" / "10月24日 8点"
+        - "10-24" / "10月24日" (缺省小时分钟则默认为 08:00)
+        """
+        s = str(time_str).strip()
+        full_m = re.search(r"\d{4}[-/年\.]\s*(\d{1,2})[-/月\.]\s*(\d{1,2})(?:日|号)?(?:\s+(\d{1,2})(?:[:/点](\d{1,2})?)?)?", s)
+        if full_m:
+            month = int(full_m.group(1))
+            day = int(full_m.group(2))
+            h = int(full_m.group(3)) if full_m.group(3) else 8
+            minute = int(full_m.group(4)) if full_m.group(4) else 0
+            return max(1, min(12, month)), max(1, min(31, day)), max(0, min(23, h)), max(0, min(59, minute))
+
+        cn_m = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})(?:日|号)?(?:\s*(\d{1,2})(?:[:/点](\d{1,2})?)?)?", s)
+        if cn_m:
+            month = int(cn_m.group(1))
+            day = int(cn_m.group(2))
+            h = int(cn_m.group(3)) if cn_m.group(3) else 8
+            minute = int(cn_m.group(4)) if cn_m.group(4) else 0
+            return max(1, min(12, month)), max(1, min(31, day)), max(0, min(23, h)), max(0, min(59, minute))
+
+        slash_m = re.search(r"(\d{1,2})[-/\.](\d{1,2})(?:\s+(\d{1,2})(?:[:/点](\d{1,2})?)?)?", s)
+        if slash_m:
+            month = int(slash_m.group(1))
+            day = int(slash_m.group(2))
+            h = int(slash_m.group(3)) if slash_m.group(3) else 8
+            minute = int(slash_m.group(4)) if slash_m.group(4) else 0
+            return max(1, min(12, month)), max(1, min(31, day)), max(0, min(23, h)), max(0, min(59, minute))
+
+        now = datetime.datetime.now()
+        h, minute = cls.parse_time_str_to_hour_minute(s)
+        return now.month, now.day, h, minute
+
     # 时间与下次触发时间计算
     # -------------------------------------------------------------------------
     @staticmethod
@@ -229,6 +280,25 @@ class DynamicScheduler:
             interval_sec = cls.parse_interval_seconds(time_str, default=60)
             return now_ts + interval_sec
 
+        # 0.1 年度循环类型 (recur_type == 'yearly')
+        if recur_type == "yearly":
+            month, day, target_h, target_m = cls.parse_yearly_date(time_str)
+            now_user_dt = datetime.datetime.now(user_tz)
+            current_year = now_user_dt.year
+
+            def _build_yearly_dt(year, m, d, hh, mm):
+                try:
+                    return datetime.datetime(year, m, d, hh, mm, 0, tzinfo=user_tz)
+                except ValueError:
+                    if m == 2 and d == 29:
+                        return datetime.datetime(year, 2, 28, hh, mm, 0, tzinfo=user_tz)
+                    return datetime.datetime(year, m, min(d, 28), hh, mm, 0, tzinfo=user_tz)
+
+            candidate = _build_yearly_dt(current_year, month, day, target_h, target_m)
+            if candidate.timestamp() <= now_ts:
+                candidate = _build_yearly_dt(current_year + 1, month, day, target_h, target_m)
+            return candidate.timestamp()
+
         # 1. 相对时间匹配（如 "now", "立即", "马上", "30m", "30分钟后", "2小时后", "+15m"）
         if recur_type == "once" and time_str.strip().lower() in ("now", "立即", "马上", "立刻", "当前"):
             return now_ts
@@ -278,6 +348,30 @@ class DynamicScheduler:
         if task.recur_type == "interval":
             interval_sec = cls.parse_interval_seconds(task.time_str, default=60)
             return time.time() + interval_sec
+
+        if task.recur_type == "yearly":
+            user_tz, _, _ = TimezoneHelper.resolve_timezone(task.target_city or task.target_timezone)
+            month, day, target_h, target_m = cls.parse_yearly_date(task.time_str)
+            now_user_dt = datetime.datetime.now(user_tz)
+            base_year = now_user_dt.year
+            if task.next_run_timestamp > 0:
+                try:
+                    prev_dt = datetime.datetime.fromtimestamp(task.next_run_timestamp, tz=user_tz)
+                    base_year = max(base_year, prev_dt.year)
+                except Exception:
+                    pass
+            next_year = base_year + 1
+
+            def _build_next_yearly_dt(year, m, d, hh, mm):
+                try:
+                    return datetime.datetime(year, m, d, hh, mm, 0, tzinfo=user_tz)
+                except ValueError:
+                    if m == 2 and d == 29:
+                        return datetime.datetime(year, 2, 28, hh, mm, 0, tzinfo=user_tz)
+                    return datetime.datetime(year, m, min(d, 28), hh, mm, 0, tzinfo=user_tz)
+
+            next_candidate = _build_next_yearly_dt(next_year, month, day, target_h, target_m)
+            return next_candidate.timestamp()
 
         weekdays = task.get_weekdays_list()
         if task.recur_type == "workday":
@@ -430,7 +524,9 @@ class DynamicScheduler:
                 for row in rows:
                     t = ScheduledTask(**dict(row))
                     if is_all:
-                        matched_tasks.append(t)
+                        # 保护机制：批量取消全部时，自动豁免系统后台常驻守护任务（如 QQ 空间巡检、保活等）
+                        if not self.is_system_task(t):
+                            matched_tasks.append(t)
                     else:
                         payload_str = str(t.action_payload or "").lower()
                         if (t.task_id.lower() == kw or
