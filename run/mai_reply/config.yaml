@@ -84,10 +84,8 @@ context: # 上下文相关配置
   global_memory_slot_count: 10  # Bot全局独立生活经历记忆槽位数（默认10条）
   user_memory_slot_count: 10    # 每个用户的长期客观事实记忆槽位数（默认10条）
   memory_slot_max_chars: 30    # 单条槽位记忆最大字数限制
-
   enable_group_memory_slots: true  # 是否开启群专属结构化特征槽位（社群定位/禁忌/黑话/生态等10个槽位，替代群印象避免API浪费与上下文冗余）
   group_memory_slot_count: 10      # 群记忆槽位数量（默认10个）
-
   group_user_context_turns: 3      # 群聊中被@时，最多回溯该用户自身历史轮数（默认3轮，控制私聊上下文，把更多空间留给群公屏消息）
   anti_nsfw:
     enable: false          # 是否开启审核系统，模型默认用trigger_llm的
