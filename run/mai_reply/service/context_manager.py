@@ -97,12 +97,19 @@ class ContextManager:
             "enable_group_impression", ccfg.get("enable_impression", True)
         )
         self.group_impression_ttl: int = ccfg.get("impression_ttl", 604800)
-        self.group_impression_whitelist_enabled: bool = bool(
-            ccfg.get("group_impression_whitelist_enabled", True)
+        # 群聊记忆白名单配置（通用支持群生态特征槽位与群整体印象）
+        self.group_memory_whitelist_enabled: bool = bool(
+            ccfg.get(
+                "group_memory_whitelist_enabled",
+                ccfg.get("group_impression_whitelist_enabled", True),
+            )
         )
-        self.group_impression_whitelist: list = [
-            int(x) for x in ccfg.get("group_impression_whitelist", []) if str(x).isdigit()
+        raw_gwl = ccfg.get("group_memory_whitelist", ccfg.get("group_impression_whitelist", []))
+        self.group_memory_whitelist: list = [
+            int(x) for x in raw_gwl if str(x).isdigit()
         ]
+        self.group_impression_whitelist_enabled: bool = self.group_memory_whitelist_enabled
+        self.group_impression_whitelist: list = self.group_memory_whitelist
         # 群聊回复时，最多读取最近 N 位发言者的记忆（槽位特征或主观印象）
         self.group_reply_speaker_memory_count: int = int(
             ccfg.get("group_reply_speaker_memory_count", ccfg.get("group_reply_impression_count", 3))
@@ -449,17 +456,17 @@ class ContextManager:
 
     # ------------------------------------------------------------------ 群聊印象（新增）
 
-    def is_group_impression_enabled(self, group_id: int) -> bool:
+    def is_group_memory_enabled(self, group_id: int) -> bool:
         """
-        判断指定群聊是否允许启用群聊印象：
-        1. 若全局 enable_group_impression 为 False，直接禁用；
-        2. 若 group_impression_whitelist_enabled 为 True（白名单模式）：
-           - 若填写了 group_impression_whitelist，仅在该列表中的群生效；
-           - 若 group_impression_whitelist 为 []（未填写），自动使用 trigger_llm 配置的 whitelist；
-        3. 若 group_impression_whitelist_enabled 为 False（全局模式）：
-           - 对所有群使用群聊印象。
+        判断指定群聊是否允许启用群聊记忆体系（通用控制群生态槽位与群整体印象）：
+        1. 若当前生效群记忆模式为 'none'，直接禁用；
+        2. 若 group_memory_whitelist_enabled 为 True（白名单模式）：
+           - 若填写了 group_memory_whitelist，仅在该列表中的群生效；
+           - 若 group_memory_whitelist 为 []（未填写），自动使用 trigger_llm 配置的 whitelist；
+        3. 若 group_memory_whitelist_enabled 为 False（全局模式）：
+           - 对所有群生效。
         """
-        if not self.enable_group_impression:
+        if self.get_effective_group_memory_mode() == 'none':
             return False
 
         if not group_id:
@@ -471,26 +478,30 @@ class ContextManager:
             return False
 
         # 白名单模式
-        if self.group_impression_whitelist_enabled:
-            if self.group_impression_whitelist:
-                return gid in self.group_impression_whitelist
+        if self.group_memory_whitelist_enabled:
+            if self.group_memory_whitelist:
+                return gid in self.group_memory_whitelist
 
             # 若未填写，自动使用 trigger_llm 配置的 whitelist
-            trig_cfg = self.cfg.mai_reply.config.get("trigger_llm", {})
+            trig_cfg = self.cfg.mai_reply.config.get('trigger_llm', {})
             trig_whitelist = [
-                int(x) for x in trig_cfg.get("whitelist", []) if str(x).isdigit()
+                int(x) for x in trig_cfg.get('whitelist', []) if str(x).isdigit()
             ]
             return gid in trig_whitelist
 
-        # 全局模式（group_impression_whitelist_enabled=False，对所有群生效）
+        # 全局模式（group_memory_whitelist_enabled=False，对所有群生效）
         return True
 
+    def is_group_impression_enabled(self, group_id: int) -> bool:
+        """兼容历史调用的别名"""
+        return self.is_group_memory_enabled(group_id)
+
     def get_group_impression(self, group_id: int) -> str:
-        """获取对某个群的整体气氛/话题印象"""
-        if not self.is_group_impression_enabled(group_id):
-            return ""
+        """获取对某个群的整体氛围/主观印象"""
+        if not self.is_group_memory_enabled(group_id):
+            return ''
         raw = self._imp_get(self._group_impression_key(group_id))
-        return raw if isinstance(raw, str) else ""
+        return raw if isinstance(raw, str) else ''
 
     def update_group_impression(self, group_id: int, summary: str) -> None:
         """更新群聊气氛/话题印象"""
@@ -591,6 +602,8 @@ class ContextManager:
 
     def get_group_memory_slots(self, group_id: int) -> str:
         """获取群专属结构化固定记忆槽位文本（用于 prompt 注入）"""
+        if not self.is_group_memory_enabled(group_id):
+            return ''
         if not getattr(self, "enable_group_memory_slots", False) or not hasattr(self, "memory_slots"):
             return ""
         return self.memory_slots.format_group_slots_for_prompt(group_id)

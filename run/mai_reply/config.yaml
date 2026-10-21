@@ -64,6 +64,8 @@ context: # 上下文相关配置
   # 记忆体系模式选择与群生态槽位配置：当两者都启用时，可自行选择 ( "slots" | "impression" | "both")
   user_memory_mode: "slots"    # 用户记忆模式：slots(槽位事实)、impression(主观印象)、both(两者兼备)。若设为slots且开了impression，系统视同impression关闭以节省API token并出warning
   group_memory_mode: "slots"   # 群聊记忆模式：slots(群生态10槽位)、impression(群整体印象)、both(两者兼备)。若设为slots且开了群印象，同理视同群印象关闭以节省token
+  group_memory_whitelist_enabled: true # 群聊记忆是否启用白名单模式。true=白名单模式（仅白名单群触发群生态槽位/群印象）；false=全局模式（对所有群生效）
+  group_memory_whitelist: []            # 群聊记忆白名单群号列表。若开启了白名单模式但此处为[]，将自动使用trigger_llm配置的whitelist
   # 记忆体系共用触发间隔与发言者读取配置（通用控制 Slots 与 Impression 两大系统）：
   user_trigger_turns: 3               # 用户记忆更新间隔（无论是槽位事实还是主观印象，每进行几轮对话触发一次更新，默认3轮）
   group_trigger_messages: 10          # 群聊记忆更新间隔（无论是群生态槽位还是群整体印象，群公屏每积累多少条消息触发一次更新，默认10条）
@@ -75,8 +77,6 @@ context: # 上下文相关配置
   impression_ttl: 604800  # 7天 印象保留时间
   impression_max_chars: 180 #用户impression最大字数
   enable_group_impression: false # 是否启用群聊气氛印象
-  group_impression_whitelist_enabled: true # 是否启用白名单模式。true=白名单模式（仅白名单群触发）；false=全局模式（对所有群生效）
-  group_impression_whitelist: []            # 群聊印象白名单群号列表。若开启了白名单模式但此处为[]，将自动使用trigger_llm配置的whitelist
   group_max_chars: 120 #群聊印象最大字数
 
   # Slots 结构化记忆槽位系统
