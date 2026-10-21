@@ -43,8 +43,8 @@ redis: #redis数据库相关设置，如果您不清楚请不要乱动
   redis_port: default
   redis_db: default
 
-# 默认更新使用的Git源序号：0为官方GitHub源(https://github.com/avilliai/Eridanus.git)，1为GitCode源，未配置时默认为0
-git_update_source: 0
 
-# PyPI 镜像源配置：默认阿里源(https://mirrors.aliyun.com/pypi/simple/)，海外机器或需要官方源可配置为 https://pypi.org/simple/ 或其他镜像
-pypi_source: "https://mirrors.aliyun.com/pypi/simple/"
+git_update_source: 0 # 默认更新使用的Git源序号：0为官方GitHub源(https://github.com/avilliai/Eridanus.git)，1为GitCode源，未配置时默认为0
+
+
+pypi_source: "https://mirrors.aliyun.com/pypi/simple/" # PyPI 镜像源配置：默认阿里源(https://mirrors.aliyun.com/pypi/simple/)，海外机器或需要官方源可配置为 https://pypi.org/simple/ 或其他镜像
