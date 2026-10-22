@@ -153,22 +153,35 @@ class ImpressionUpdater:
         cfg = YAMLManager.get_instance()
         ccfg = cfg.mai_reply.config.get("context", {})
 
-        # 优先使用配置中显式指定的 impression_model
-        explicit_imp_model = str(ccfg.get("impression_model") or "").strip()
+        # 记忆体系模型优先使用配置中显式指定的 memory_model（兼容 impression_model）
+        explicit_mem_model = str(ccfg.get("memory_model") or ccfg.get("impression_model") or "").strip()
 
-        # 检查 trigger_llm 配置（用于低开销提取事实与更新记忆槽位）
-        trig_cfg = cfg.mai_reply.config.get("trigger_llm", {})
+        # 读取主回复模型配置作为保底回退
+        lcfg = cfg.mai_reply.config.get("llm", {})
+        provider = str(lcfg.get("provider", "openai")).lower()
+        if provider == "gemini":
+            main_model = str(lcfg.get("gemini", {}).get("model") or "gemini-2.0-flash-001").strip()
+            main_base_url = str(lcfg.get("gemini", {}).get("base_url") or "https://generativelanguage.googleapis.com").rstrip("/")
+            main_keys = lcfg.get("gemini", {}).get("api_keys", [])
+        else:
+            main_model = str(lcfg.get("openai", {}).get("model") or "gpt-3.5-turbo").strip()
+            main_base_url = str(lcfg.get("openai", {}).get("base_url") or "https://api.openai.com").rstrip("/")
+            main_keys = lcfg.get("openai", {}).get("api_keys", [])
+        main_oa_keys = [k for k in (main_keys if isinstance(main_keys, list) else [main_keys]) if k]
+
+        # 读取 trigger_llm 配置（专门用于轻量判断与低成本提取记忆槽位/印象）
+        trig_cfg = cfg.mai_reply.config.get("trigger_llm", {}) or {}
         trig_model = str(trig_cfg.get("model") or "").strip()
         trig_base_url = str(trig_cfg.get("base_url") or "").strip().rstrip("/")
         trig_api_key = str(trig_cfg.get("api_key") or "").strip()
 
-        # 优先使用 trigger_llm 配置，如果 trigger_llm 未配置则回退到主回复模型配置
-        if trig_model:
-            lcfg = cfg.mai_reply.config.get("llm", {})
-            main_oa_keys = lcfg.get("openai", {}).get("api_keys", [])
+        # 优先级原则：
+        # 1. 记忆体系默认且优先使用廉价快速的 trigger_llm 配置（避免调用昂贵的主回复大模型浪费 API 资源）
+        # 2. 若 trigger_llm 未填写 model 且未填写 memory_model，才自动回退到主回复模型配置
+        if trig_model or explicit_mem_model:
+            target_model = explicit_mem_model if explicit_mem_model else trig_model
+            target_base_url = trig_base_url if trig_base_url else main_base_url
             chosen_keys = [trig_api_key] if trig_api_key else (main_oa_keys if main_oa_keys else [""])
-            target_model = explicit_imp_model if explicit_imp_model else trig_model
-            base_url = trig_base_url if trig_base_url else "https://api.openai.com/v1"
 
             custom_llm_cfg = {
                 "provider": "openai",
@@ -177,7 +190,7 @@ class ImpressionUpdater:
                 "openai": {
                     "api_keys": chosen_keys,
                     "model": target_model,
-                    "base_url": base_url,
+                    "base_url": target_base_url,
                     "no_extra_paramters": False,
                     "temperature": 0.3,
                     "max_tokens": 1024,
@@ -186,25 +199,19 @@ class ImpressionUpdater:
             try:
                 self._slot_llm = LLMClient(cfg, custom_llm_cfg=custom_llm_cfg)
             except Exception as e:
-                logger.warning(f"[MaiReply] 基于 trigger_llm 构建独立客户端失败，将回退主回复模型: {e}")
+                logger.warning(f"[MaiReply] 基于 trigger_llm 端点构建记忆专用客户端失败，将回退主回复模型: {e}")
                 self._slot_llm = self._main_llm
 
             self.model = target_model
-            self.api_key = trig_api_key
-            self.base_url = base_url
-            logger.info(f"[MaiReply] 记忆槽位与印象更新优先启用 trigger_llm 配置: model={self.model}, base_url={base_url}")
+            self.api_key = trig_api_key or (main_oa_keys[0] if main_oa_keys else "")
+            self.base_url = target_base_url
+            logger.info(f"[MaiReply] 记忆槽位与印象更新优先启用 trigger_llm 独立配置: model={self.model}, base_url={self.base_url}")
         else:
             self._slot_llm = self._main_llm
-            lcfg = cfg.mai_reply.config.get("llm", {})
-            provider = str(lcfg.get("provider", "openai")).lower()
-            if provider == "gemini":
-                main_model = lcfg.get("gemini", {}).get("model")
-            else:
-                main_model = lcfg.get("openai", {}).get("model")
-            self.model = explicit_imp_model if explicit_imp_model else (main_model or "gpt-3.5-turbo")
-            self.api_key = trig_api_key
-            self.base_url = trig_base_url
-            logger.info(f"[MaiReply] trigger_llm 未配置，记忆槽位与印象更新回退使用主回复模型: model={self.model}")
+            self.model = main_model or "gpt-3.5-turbo"
+            self.api_key = trig_api_key or (main_oa_keys[0] if main_oa_keys else "")
+            self.base_url = main_base_url
+            logger.info(f"[MaiReply] trigger_llm 未配置，记忆槽位与印象更新自动回退使用主回复模型: model={self.model}")
 
         self.max_chars = int(ccfg.get("impression_max_chars", IMPRESSION_MAX_CHARS))
         # 用户印象更新轮数（优先读 user_trigger_turns，兼容 impression_trigger_turns）
@@ -301,24 +308,56 @@ class ImpressionUpdater:
         target_llm = self._slot_llm or self._main_llm
 
         if tools:
-            # 携带工具调用时，走支持函数调用的 LLMClient
+            # 携带工具调用时，走支持函数调用的记忆专用 LLMClient（优先 trigger_llm）
             if target_llm:
+                try:
+                    res = await target_llm.chat(
+                        messages=[{"role": "user", "content": prompt}],
+                        system_prompt=sys_p,
+                        tools=tools,
+                        model=self.model,
+                    )
+                    if res is not None:
+                        return res
+                except Exception as e:
+                    logger.warning(f"[MaiReply] 记忆模型函数调用失败，尝试主模型兜底: {e}")
+                    if self._main_llm and target_llm != self._main_llm:
+                        try:
+                            res = await self._main_llm.chat(
+                                messages=[{"role": "user", "content": prompt}],
+                                system_prompt=sys_p,
+                                tools=tools,
+                            )
+                            if res is not None:
+                                return res
+                        except Exception as me:
+                            logger.error(f"[MaiReply] 主模型兜底执行工具调用亦失败: {me}")
+            return ""
+
+        # 普通文本生成（主观印象总结/压缩），优先走轻量记忆模型
+        if target_llm:
+            try:
                 res = await target_llm.chat(
                     messages=[{"role": "user", "content": prompt}],
                     system_prompt=sys_p,
-                    tools=tools,
                     model=self.model,
                 )
-                return res or ""
+                if res is not None:
+                    return res
+            except Exception as e:
+                logger.warning(f"[MaiReply] 记忆专属模型调用失败，尝试回退备用端点: {e}")
+                if self._main_llm and target_llm != self._main_llm:
+                    try:
+                        res = await self._main_llm.chat(
+                            messages=[{"role": "user", "content": prompt}],
+                            system_prompt=sys_p,
+                        )
+                        if res is not None:
+                            return res
+                    except Exception as me:
+                        logger.error(f"[MaiReply] 主模型回退调用亦失败: {me}")
 
-        if target_llm:
-            res = await target_llm.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt=sys_p,
-                model=self.model,
-            )
-            return res or ""
-        elif self.base_url:
+        if self.base_url:
             res = await simplified_chat(
                 self.base_url,
                 [{"role": "user", "content": prompt}],
