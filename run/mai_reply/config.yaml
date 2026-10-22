@@ -67,15 +67,15 @@ context: # 上下文相关配置
   group_memory_whitelist_enabled: true # 群聊记忆是否启用白名单模式。true=白名单模式（仅白名单群触发群生态槽位/群印象）；false=全局模式（对所有群生效）
   group_memory_whitelist: []            # 群聊记忆白名单群号列表。若开启了白名单模式但此处为[]，将自动使用trigger_llm配置的whitelist
   # 记忆体系共用模型、触发间隔与发言者读取配置（通用控制 Slots 与 Impression 两大系统）：
-  memory_model: ""                    # 记忆体系模型（通用控制槽位事实提取与主观印象生成）。留空则优先使用 trigger_llm 配置；仅当 trigger_llm 亦未配置时才会自动回退到主回复模型。建议使用廉价快速的轻量模型（如 gpt-4o-mini 等）
-  # 注：下方保留的 impression_model 亦作为向后兼容别名受到支持
+  memory_model: ""                    # 记忆体系模型（通用控制槽位事实提取与主观印象生成）。留空则优先使用 trigger_llm 配置
+
   user_trigger_turns: 3               # 用户记忆更新间隔（无论是槽位事实还是主观印象，每进行几轮对话触发一次更新，默认3轮）
   group_trigger_messages: 10          # 群聊记忆更新间隔（无论是群生态槽位还是群整体印象，群公屏每积累多少条消息触发一次更新，默认10条）
   group_reply_speaker_memory_count: 3 # 群聊回复时读取最近几位发言者的记忆（通用支持槽位事实与主观印象，默认3人）
 
   # Impression 主观印象总结系统
   enable_impression: false   # 是否启用用户印象记忆（跨会话）
-  impression_model: ""   #生成用户印象使用的模型，留空则使用llm配置中的模型。建议改成廉价快速的模型
+  impression_model: ""   #生成用户印象使用的模型，留空则使用llm配置中的模型，可不填
   impression_ttl: 604800  # 7天 印象保留时间
   impression_max_chars: 180 #用户impression最大字数
   enable_group_impression: false # 是否启用群聊气氛印象
