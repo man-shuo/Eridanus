@@ -120,7 +120,7 @@ async def call_image_search(bot, event, config, image_url=None):
     ]
     nsfw_search_operate_level = config.basic_plugin.config["搜图"]["nsfw_search_operate_level"]
     user_perm = getattr(user_info, "permission", 0) if user_info else 0
-    if user_perm > nsfw_search_operate_level:
+    if user_perm >= nsfw_search_operate_level:
         bot.logger.info("追加av搜索")
         functions.append(call_image_search_avscan(bot, event, config, local_img_path))
 
@@ -190,9 +190,12 @@ async def call_image_search2(bot, event, config, local_img_path):
     if not config.basic_plugin.config.get("搜图", {}).get("soutu_bot", True):
         return None
     bot.logger.info("调用soutu.bot搜索图片")
+    proxy = config.common_config.basic_config.get("proxy", {}).get("http_proxy")
+    if proxy and not str(proxy).strip():
+        proxy = None
     forMeslist = []
     try:
-        r = await async_search_by_image(local_img_path)
+        r = await async_search_by_image(local_img_path, proxy=proxy)
     except Exception as e:
         bot.logger.warning(f"soutu.bot 搜索异常(可能接口已调整): {e}")
         return None
