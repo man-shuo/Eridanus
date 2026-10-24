@@ -4,9 +4,22 @@ tts: #全局通用配置
   lang_type: "JP"             # 目标发音语言（JP / ZH 等），JP 会将中文自动翻译为自然日文
   api_key: ""                 # 翻译/在线接口 API Key，留空则自动继承 mai_reply 中的 trigger_llm/openai key
 
-# ------------------------------------------------------------------------------
-# 1. PrettyDerby 赛马娘 Bert-VITS2 直连引擎（本地直连 HuggingFace，不依赖第三方中转网关）
-# ------------------------------------------------------------------------------
+gpt_sovits:
+  api_base: ""  # 填写自建或代理服务地址。http://api.apollodorus.xyz/提供接口
+  api_key: ""   # 留空=直连服务端；非空=经过API鉴权
+  ref_audio_path: output/slicer_opt/output.wav_0009342720_0009558400.wav
+  ref_text: 怎么啊？如果有你在也不放心，那就干脆给我也装个限制器或者炸弹呗。
+  speakers:
+    - 达妮娅
+  top_k: 15
+  top_p: 1
+  temperature: 1
+  text_split_method: cut1
+  batch_size: 1
+  speed_factor: 0.91
+  seed: -1
+  repetition_penalty: 1.35
+  streaming_mode: False
 # 可用发音人（共 9 位角色，支持中文名/全名/缩写别名）：
 # - natuki                     (夏木 / 默认声线)
 # - 米浴                        (别名: rice_shower, rice_shower_米浴_ライスシャワー)
@@ -17,7 +30,7 @@ tts: #全局通用配置
 # - 爱丽数码                    (别名: agnes_digital, agnes_digital_爱丽数码_アグネスデジタル)
 # - 优秀素质                    (别名: nice_nature, nice_nature_优秀素质_ナイスネイチャ)
 # - 里见光钻                    (别名: satono_diamond, satono_diamond_里见光钻_サトノダイヤモンド)
-pretty_derby:
+pretty_derby: # PrettyDerby 赛马娘 Bert-VITS2 直连引擎（本地直连 HuggingFace，不依赖第三方中转网关）
   speaker: "natuki"
 
 # ------------------------------------------------------------------------------
@@ -70,36 +83,11 @@ otto:  #otto, OTTO, 电棍, 吉吉国王。基于活字印刷音源拼接，生�
   endpoint: "https://ottohzys.wzq02.top"
 
 
-gpt_sovits:
-  api_base: ""  # 填写自建或代理服务地址。http://api.apollodorus.xyz/提供接口
-  api_key: ""   # 留空=直连服务端；非空=经过API鉴权
-  ref_audio_path: output/slicer_opt/output.wav_0009342720_0009558400.wav
-  ref_text: 怎么啊？如果有你在也不放心，那就干脆给我也装个限制器或者炸弹呗。
-  speakers:
-    - 达妮娅
-  top_k: 15
-  top_p: 1
-  temperature: 1
-  text_split_method: cut1
-  batch_size: 1
-  speed_factor: 0.91
-  seed: -1
-  repetition_penalty: 1.35
-  streaming_mode: False
 
-# ------------------------------------------------------------------------------
-# 6. Local VITS 本地服务（兼容性保留）
-# ------------------------------------------------------------------------------
-# 适合本地独立部署了 VITS-simple-api 等经典服务的用户使用。
-# 可用发音人示例：
-# - 綾地寧々 (默认)
-vits:
+vits:  #VITS 本地服务（兼容性保留） 适合本地独立部署了 VITS-simple-api 等经典服务的用户使用。
   speaker: "綾地寧々"
   base_url: "http://127.0.0.1:5009"
 
-# ------------------------------------------------------------------------------
-# 7. Apollodorus 在线语音网关（辅助 / 云端备用通道）
-# ------------------------------------------------------------------------------
-apollodorus:
+apollodorus:  #Apollodorus 在线语音网关（辅助 / 云端备用通道）
   base_url: "http://api.apollodorus.xyz/v1"
   api_key: ""
