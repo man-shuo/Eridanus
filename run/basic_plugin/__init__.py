@@ -34,7 +34,7 @@ function_declarations=[
             "properties": {
                 "tags": {
                     "type": "array",
-                    "description": "所要求的关键词。eg.白丝 萝莉",
+                    "description": "所要求的关键词。eg.白丝 黑丝",
                     "items": {
                         "type": "string"
                     }
