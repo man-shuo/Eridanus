@@ -9,10 +9,17 @@ import asyncio
 import httpx
 from PIL import Image as PILImage
 
+try:
+    from curl_cffi.requests import AsyncSession as CurlAsyncSession, Session as CurlSession
+    from curl_cffi.curl import CurlMime
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
 API_URL = "https://soutubot.moe/api/search"
 BASE_URL = "https://soutubot.moe"
 
-# 采用现代浏览器 User-Agent，避免触发 Cloudflare WAF 403 拦截
+# 采用现代浏览器 User-Agent 与 Client Hints
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
 BROWSER_HEADERS = {
@@ -168,7 +175,6 @@ def _get_client_kwargs(proxy: Optional[str] = None, http2: bool = True) -> Dict[
     if proxy and str(proxy).strip():
         proxy_url = str(proxy).strip()
         try:
-            # httpx >= 0.24 采用 proxy 参数
             kwargs["proxy"] = proxy_url
         except Exception:
             kwargs["proxies"] = {"all://": proxy_url}
@@ -178,20 +184,65 @@ def _get_client_kwargs(proxy: Optional[str] = None, http2: bool = True) -> Dict[
 async def _async_do_search(image_data: bytes, factor: float = 1.2, proxy: Optional[str] = None) -> Dict[str, Any]:
     """
     异步发送图片二进制给 soutubot.moe 新版 API。
-    使用 HTTP/2 协议避免 Cloudflare WAF 403 Forbidden 拦截。
+    优先采用 curl_cffi 模拟 Chrome 真实 TLS 指纹 (JA3/JA4) 规避 Cloudflare WAF 403 拦截；
+    若未安装 curl_cffi 则回退至 httpx。
     """
     prepared_data = _prepare_image_data(image_data)
+
+    # 1. 优先尝试 curl_cffi（模拟真实 Chrome 浏览器 TLS/HTTP2 指纹）
+    if HAS_CURL_CFFI:
+        try:
+            mime = CurlMime.from_list([
+                {"name": "file", "filename": "image.png", "content_type": "image/png", "data": prepared_data},
+                {"name": "factor", "data": str(factor).encode("utf-8")},
+                {"name": "metadata_mode", "data": b"display"},
+                {"name": "top_k", "data": b"25"},
+            ])
+            s_kwargs: Dict[str, Any] = {"impersonate": "chrome124"}
+            if proxy and str(proxy).strip():
+                s_kwargs["proxy"] = str(proxy).strip()
+
+            async with CurlAsyncSession(**s_kwargs) as session:
+                resp = await session.post(
+                    API_URL,
+                    multipart=mime,
+                    headers=BROWSER_HEADERS,
+                    timeout=30.0
+                )
+                if resp.status_code == 200:
+                    raw_json = resp.json()
+                    parsed_items = _parse_soutubot_response(raw_json)
+                    return {
+                        "data": parsed_items,
+                        "raw": raw_json,
+                        "results": raw_json.get("results", [])
+                    }
+                else:
+                    print(f"[!] curl_cffi 请求返回状态码 {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            print(f"[!] curl_cffi 异步请求异常，尝试回退 httpx: {e}")
+
+    # 2. 回退到 httpx
     files = {"file": ("image.png", prepared_data, "image/png")}
     data = {"factor": str(factor), "metadata_mode": "display", "top_k": "25"}
 
-    # 优先尝试 HTTP/2，若代理环境不支持 HTTP/2 则降级重试 HTTP/1.1
+    last_error = None
     for use_h2 in [True, False]:
         kwargs = _get_client_kwargs(proxy=proxy, http2=use_h2)
         try:
             async with httpx.AsyncClient(**kwargs) as client:
+                try:
+                    await client.get(BASE_URL + "/", headers=BROWSER_HEADERS, timeout=10.0)
+                except Exception:
+                    pass
+
                 resp = await client.post(API_URL, headers=BROWSER_HEADERS, files=files, data=data)
-                if resp.status_code == 403 and use_h2:
-                    continue
+                if resp.status_code == 403:
+                    print(f"[!] httpx (h2={use_h2}) 收到 403 Forbidden。响应预览: {resp.text[:150]}")
+                    if not HAS_CURL_CFFI:
+                        print("[*] 提示: 403 是由于 Cloudflare WAF 拦截了 Python 原生 TLS 指纹，推荐运行: pip install curl_cffi")
+                    if use_h2:
+                        continue
                 resp.raise_for_status()
                 raw_json = resp.json()
                 parsed_items = _parse_soutubot_response(raw_json)
@@ -201,10 +252,12 @@ async def _async_do_search(image_data: bytes, factor: float = 1.2, proxy: Option
                     "results": raw_json.get("results", [])
                 }
         except Exception as e:
+            last_error = e
             if use_h2:
                 continue
-            raise e
 
+    if last_error:
+        raise last_error
     raise RuntimeError("soutubot 请求未返回有效结果")
 
 
@@ -213,16 +266,61 @@ def _do_search(image_data: bytes, factor: float = 1.2, proxy: Optional[str] = No
     同步发送图片二进制给 soutubot.moe 新版 API。
     """
     prepared_data = _prepare_image_data(image_data)
+
+    # 1. 优先尝试 curl_cffi（模拟真实 Chrome 浏览器 TLS/HTTP2 指纹）
+    if HAS_CURL_CFFI:
+        try:
+            mime = CurlMime.from_list([
+                {"name": "file", "filename": "image.png", "content_type": "image/png", "data": prepared_data},
+                {"name": "factor", "data": str(factor).encode("utf-8")},
+                {"name": "metadata_mode", "data": b"display"},
+                {"name": "top_k", "data": b"25"},
+            ])
+            s_kwargs: Dict[str, Any] = {"impersonate": "chrome124"}
+            if proxy and str(proxy).strip():
+                s_kwargs["proxy"] = str(proxy).strip()
+
+            with CurlSession(**s_kwargs) as session:
+                resp = session.post(
+                    API_URL,
+                    multipart=mime,
+                    headers=BROWSER_HEADERS,
+                    timeout=30.0
+                )
+                if resp.status_code == 200:
+                    raw_json = resp.json()
+                    parsed_items = _parse_soutubot_response(raw_json)
+                    return {
+                        "data": parsed_items,
+                        "raw": raw_json,
+                        "results": raw_json.get("results", [])
+                    }
+                else:
+                    print(f"[!] curl_cffi 同步请求返回状态码 {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            print(f"[!] curl_cffi 同步请求异常，尝试回退 httpx: {e}")
+
+    # 2. 回退到 httpx
     files = {"file": ("image.png", prepared_data, "image/png")}
     data = {"factor": str(factor), "metadata_mode": "display", "top_k": "25"}
 
+    last_error = None
     for use_h2 in [True, False]:
         kwargs = _get_client_kwargs(proxy=proxy, http2=use_h2)
         try:
             with httpx.Client(**kwargs) as client:
+                try:
+                    client.get(BASE_URL + "/", headers=BROWSER_HEADERS, timeout=10.0)
+                except Exception:
+                    pass
+
                 resp = client.post(API_URL, headers=BROWSER_HEADERS, files=files, data=data)
-                if resp.status_code == 403 and use_h2:
-                    continue
+                if resp.status_code == 403:
+                    print(f"[!] httpx (h2={use_h2}) 收到 403 Forbidden。响应预览: {resp.text[:150]}")
+                    if not HAS_CURL_CFFI:
+                        print("[*] 提示: 403 是由于 Cloudflare WAF 拦截了 Python 原生 TLS 指纹，推荐运行: pip install curl_cffi")
+                    if use_h2:
+                        continue
                 resp.raise_for_status()
                 raw_json = resp.json()
                 parsed_items = _parse_soutubot_response(raw_json)
@@ -232,10 +330,12 @@ def _do_search(image_data: bytes, factor: float = 1.2, proxy: Optional[str] = No
                     "results": raw_json.get("results", [])
                 }
         except Exception as e:
+            last_error = e
             if use_h2:
                 continue
-            raise e
 
+    if last_error:
+        raise last_error
     raise RuntimeError("soutubot 请求未返回有效结果")
 
 
@@ -282,7 +382,7 @@ def search_img_by_path_or_url(target: str, factor: float = 1.2, proxy: Optional[
 
 async def async_search_by_image(image_path: str, factor: float = 1.2, proxy: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    异步包装：本地图片搜索，优先使用原生异步 HTTP/2 客户端
+    异步包装：本地图片搜索，优先使用原生异步客户端 (curl_cffi / httpx)
     """
     try:
         target = get_local_file_path(image_path)
