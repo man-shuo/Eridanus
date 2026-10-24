@@ -1,16 +1,105 @@
+tts: #全局通用配置
+  default_speaker: "natuki"   # 默认发音人（未指定角色时使用）
+  length_limit: 150           # 最大单次合成字符长度上限（超长自动截断）
+  lang_type: "JP"             # 目标发音语言（JP / ZH 等），JP 会将中文自动翻译为自然日文
+  api_key: ""                 # 翻译/在线接口 API Key，留空则自动继承 mai_reply 中的 trigger_llm/openai key
+
+# ------------------------------------------------------------------------------
+# 1. PrettyDerby 赛马娘 Bert-VITS2 直连引擎（本地直连 HuggingFace，不依赖第三方中转网关）
+# ------------------------------------------------------------------------------
+# 可用发音人（共 9 位角色，支持中文名/全名/缩写别名）：
+# - natuki                     (夏木 / 默认声线)
+# - 米浴                        (别名: rice_shower, rice_shower_米浴_ライスシャワー)
+# - 目白麦昆                    (别名: mejiro_mcqueen, mejiro_mcqueen_目白麦昆_メジロマックイーン)
+# - 真机伶                      (别名: curren_chan, curren_chan_真机伶_カレンチャン)
+# - 待兼福来                    (别名: matikane_fukukitaru, matikane_fukukitaru_待兼福来_マチカネフクキタル)
+# - 待兼诗歌剧                  (别名: matikane_tannhauser, matikane_tannhauser_待兼诗歌剧_マチカネタンホイサ)
+# - 爱丽数码                    (别名: agnes_digital, agnes_digital_爱丽数码_アグネスデジタル)
+# - 优秀素质                    (别名: nice_nature, nice_nature_优秀素质_ナイスネイチャ)
+# - 里见光钻                    (别名: satono_diamond, satono_diamond_里见光钻_サトノダイヤモンド)
+pretty_derby:
+  speaker: "natuki"
+
+# ------------------------------------------------------------------------------
+# 2. Holive (Hololive Style Bert-VITS2 直连引擎)
+# ------------------------------------------------------------------------------
+# 可用发音人（共 51 位 Hololive 角色，支持原名与常用缩写）：
+# [EN 组 / Myth / Council / Advent]:
+#   MoriCalliope (别名: calli), TakanashiKiara (别名: kiara), NinomaeInanis (别名: ina),
+#   GawrGura (别名: gura), AmeliaWatson (别名: watson, amelia), IRyS, TsukumoSana,
+#   CeresFauna (别名: fauna), OuroKronii (别名: kronii), NanashiMumei (别名: mumei),
+#   HakosBaelz (别名: baelz), ShioriNovella, KosekiBijou, NerissaRavencroft
+# [ID 组 / 印尼]:
+#   AyundaRisu, MoonaHoshinova, AiraniIofifteen, KureijiOllie, AnyaMelfissa, VestiaZeta
+# [JP 组 / 日本]:
+#   TokinoSora, SakuraMiko (别名: miko), HoshimachiSuisei (别名: suisei), AZKi, YozoraMel,
+#   ShirakamiFubuki (别名: fubuki), NatsuiroMatsuri, AkiRosenthal, AkaiHaato,
+#   MinatoAqua (别名: aqua), NakiriAyame (别名: ayame), OozoraSubaru (别名: subaru),
+#   OokamiMio, NekomataOkayu (别名: okayu), InugamiKorone (别名: korone),
+#   UsadaPekora (别名: pekora), ShiranuiFlare, ShiroganeNoel, HoushouMarine (别名: marine),
+#   AmaneKanata, TsunomakiWatame, TokoyamiTowa, HimemoriLuna, YukihanaLamy, MomosuzuNene,
+#   ShishiroBotan, OmaruPolka, TakaneLui, HakuiKoyori, SakamataChloe, KazamaIroha,
+#   IchijouRirika, JuufuuteiRaden
+holive:
+  speaker: "MoriCalliope"
+
+# ------------------------------------------------------------------------------
+# 3. Blue Archive 蔚蓝档案 Bert-VITS2 直连引擎
+# ------------------------------------------------------------------------------
+# 可用发音人（共 95 位基沃托斯学生角色，支持 JP_角色名 或直接输入 角色名，大小写均可）：
+# 例如: JP_Mari / Mari (伊落玛丽), JP_Arona / Arona (阿洛娜), JP_Hina / Hina (空崎日奈),
+#       JP_Yuuka / Yuuka (早濑优香), JP_Shiroko / Shiroko (砂狼白子), JP_Aris / Aris (爱丽丝),
+#       JP_Aru / Aru (陆八魔亚瑠), JP_Asuna / Asuna (一之濑明日奈), JP_Hoshino / Hoshino (小鸟游星野),
+#       JP_Koharu / Koharu (下江小春), JP_Miku / Miku (初音未来), JP_Noa / Noa (生盐诺亚),
+#       JP_Saori / Saori (锭前纱织), JP_Wakamo / Wakamo (狐坂若藻), JP_Miyako / Miyako (月雪宫子),
+#       JP_Miyu / Miyu (霞泽美游), JP_Serika / Serika (黑见芹香), JP_Serina / Serina (鹫见芹奈),
+#       JP_Neru / Neru (美甘宁瑠), JP_Izuna / Izuna (久田泉奈), JP_Azusa / Azusa (白洲梓) ...
+# 完整清单包含: Airi, Akane, Akari, Ako, Aris, Arona, Aru, Asuna, Atsuko, Ayane, Azusa,
+#   Cherino, Chihiro, Chinatsu, Chise, Eimi, Erica, Fubuki, Fuuka, Hanae, Hanako, Hare,
+#   Haruka, Haruna, Hasumi, Hibiki, Hihumi, Himari, Hina, Hinata, Hiyori, Hoshino, Iori,
+#   Iroha, Izumi, Izuna, Juri, Kaede, Karin, Kayoko, Kazusa, Kirino, Koharu, Kokona,
+#   Kotama, Kotori, Main, Maki, Mari, Marina, Mashiro, Michiru, Midori, Miku, Mimori,
+#   Misaki, Miyako, Miyu, Moe, Momoi, Momoka, Mutsuki, NP0013, Natsu, Neru, Noa,
+#   Nodoka, Nonomi, Pina, Rin, Saki, Saori, Saya, Sena, Serika, Serina, Shigure, Shimiko,
+#   Shiroko, Shizuko, Shun, ShunBaby, Sora, Sumire, Suzumi, Tomoe, Tsubaki, Tsurugi, Ui,
+#   Utaha, Wakamo, Yoshimi, Yuuka, Yuzu, Zunko 等 95 位。
+blue_archive:
+  speaker: "JP_Mari"
+
+otto:  #otto, OTTO, 电棍, 吉吉国王。基于活字印刷音源拼接，生动还原电棍鬼畜语调，适合搞笑、整活回复。
+  endpoint: "https://ottohzys.wzq02.top"
+
+
 gpt_sovits:
-  api_base: ""  #群内获取base_url，或自建
-  api_key: ""   # 留空=直连真实服务端(api_base指向api_v2.py地址)；非空=经过api网关(api_base指向网关地址，鉴权用Bearer api_key)
+  api_base: ""  # 填写自建或代理服务地址。http://api.apollodorus.xyz/提供接口
+  api_key: ""   # 留空=直连服务端；非空=经过API鉴权
   ref_audio_path: output/slicer_opt/output.wav_0009342720_0009558400.wav
-  ref_text: 怎么啊？如果有你在也不放心，那就干脆给我也装个限制器或者炸弹喽。
+  ref_text: 怎么啊？如果有你在也不放心，那就干脆给我也装个限制器或者炸弹呗。
   speakers:
     - 达妮娅
-  top_k: 15                  # int. top k sampling
-  top_p: 1                   # float. top p sampling
-  temperature: 1             # float. temperature for sampling
-  text_split_method: cut1  # str. text split method, see text_segmentation_method.py for details.
-  batch_size: 1              # int. batch size for inference
-  speed_factor: 0.91           # float. control the speed of the synthesized audio.
-  seed: -1                   # int. random seed for reproducibility.
-  repetition_penalty: 1.35   # float. repetition penalty for T2S model.
-  streaming_mode: False      # bool or int. return audio chunk by chunk.T he available options are: 0,1,2,3 or True/False (0/False: Disabled | 1/True: Best Quality, Slowest response speed (old version streaming_mode) | 2: Medium Quality, Slow response speed | 3: Lower Quality, Faster response speed )
+  top_k: 15
+  top_p: 1
+  temperature: 1
+  text_split_method: cut1
+  batch_size: 1
+  speed_factor: 0.91
+  seed: -1
+  repetition_penalty: 1.35
+  streaming_mode: False
+
+# ------------------------------------------------------------------------------
+# 6. Local VITS 本地服务（兼容性保留）
+# ------------------------------------------------------------------------------
+# 适合本地独立部署了 VITS-simple-api 等经典服务的用户使用。
+# 可用发音人示例：
+# - 綾地寧々 (默认)
+vits:
+  speaker: "綾地寧々"
+  base_url: "http://127.0.0.1:5009"
+
+# ------------------------------------------------------------------------------
+# 7. Apollodorus 在线语音网关（辅助 / 云端备用通道）
+# ------------------------------------------------------------------------------
+apollodorus:
+  base_url: "http://api.apollodorus.xyz/v1"
+  api_key: ""

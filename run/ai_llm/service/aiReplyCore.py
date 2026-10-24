@@ -30,7 +30,7 @@ from framework_common.framework_util.func_map_loader import build_tool_fixed_par
 from run.ai_llm.clients.gemini_client import GeminiAPI, format_grounding_metadata
 from run.ai_llm.clients.openai_client import OpenAIAPI
 
-from run.ai_voice.service.tts import TTS
+from run.tts_v2.service.tts import TTS
 
 Tts = TTS()
 

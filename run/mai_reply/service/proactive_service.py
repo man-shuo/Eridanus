@@ -432,7 +432,7 @@ class ProactiveService:
         await self._maybe_send_voice(bot, user_id, segments)
 
     async def _maybe_send_voice(self, bot, user_id: int, segments: List[str]) -> None:
-        """检查并发送伴随语音"""
+        """合并并发送私聊语音"""
         try:
             voice_cfg = self.cfg.mai_reply.config.get("tts", {})
             voice_prob = int(voice_cfg.get("voice_reply_probability", 0))
@@ -440,38 +440,29 @@ class ProactiveService:
                 return
 
             combined_text = ".".join(segments)
-            # 去除括号说明
-            combined_text = re.sub(r'[（(][^）)]*[）)]', '', combined_text).strip()
+            combined_text = re.sub(r"[（(][^）)]*[）)]", "", combined_text).strip()
             if not combined_text:
                 return
 
             speaker = voice_cfg.get("speaker", "natuki")
-            from run.mai_reply.service.reply_engine import _get_gpt_sovits_client
-            client = _get_gpt_sovits_client()
-            if client and speaker in client.speakers:
-                audio_path = await client.generate_tts(combined_text)
-                if audio_path:
-                    await bot.send_friend_message(user_id, [Record(file=audio_path)])
-                    logger.info(f"[MaiReply Proactive] 用户 {user_id} 主动语音 (GPT-SoVITS) 发送完成")
-                    return
+            lang_type = voice_cfg.get("lang_type", "JP")
+            api_key = self.cfg.mai_reply.config.get("trigger_llm", {}).get("api_key", "")
 
-            # HoliveTTS 降级
-            from run.mai_reply.service.HoliveTTS import HoliveTTS
-            import uuid
-            tts = HoliveTTS()
-            save_path = f"data/voice/cache/{uuid.uuid4()}.wav"
-            lang = voice_cfg.get("lang_type", "JP").upper()
-            audio_path = await tts.synthesize_to_file(
+            from run.tts_v2.service.tts import TTS
+            tts_engine = TTS()
+            audio_path = await tts_engine.tts(
                 text=combined_text,
                 speaker=speaker,
-                language=lang,
-                save_as=save_path
+                config=self.cfg,
+                bot=bot,
+                lang_type=lang_type,
+                api_key=api_key,
             )
             if audio_path:
                 await bot.send_friend_message(user_id, [Record(file=audio_path)])
-                logger.info(f"[MaiReply Proactive] 用户 {user_id} 主动语音 (HoliveTTS) 发送完成")
+                logger.info(f"[MaiReply Proactive] 用户 {user_id} 语音关怀 ({speaker}) 发送成功")
         except Exception as e:
-            logger.warning(f"[MaiReply Proactive] 用户 {user_id} 主动语音合成或发送失败: {e}")
+            logger.warning(f"[MaiReply Proactive] 用户 {user_id} 语音合成或发送失败: {e}")
 
     async def run_scan_round(self, bot) -> None:
         """执行单轮主动关怀巡检"""

@@ -428,8 +428,8 @@ def main(bot: ExtendBot, config: YAMLManager):
                         message_context_text,
                         user_id=event.user_id,  # ← 传入 user_id
                     )
-                    # 只有在群印象启用且该群允许时，才进行群印象 tick
-                    if engine.impression_updater.is_group_impression_enabled(event.group_id):
+                    # 只有在群记忆启用且该群允许时，才进行群记忆 tick
+                    if engine.impression_updater.is_group_memory_enabled(event.group_id):
                         group_name_hint = str(event.group_id)  # 此处无法拿到群名，用 group_id 代替
                         bot_name_hint = config.common_config.basic_config["bot"]
                         engine.impression_updater.tick_group(

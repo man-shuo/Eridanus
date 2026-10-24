@@ -1,6 +1,25 @@
+﻿# CLI Bridge 配置文件
 enable: true
+
+# 最低使用权限等级（默认 10 级）
 permission_level: 10
-timeout: 3000
+
+# 进程最大执行超时时间（秒，默认 300 秒）
+timeout: 300
+
+# 是否在展示原始结果后，由 MaiReply 角色进行拟人化总结转述
+enable_summary: true
+
+# 单次返回给消息端或大模型工具的最大输出字符长度（超出则截断）
+max_output_length: 6000
+
+# 是否优先使用合并转发节点（Node）发送长内容（失败时自动降级为普通分段消息）
+forward_nodes: true
+
+# 当会话 Resume 恢复失败（如会话在外部已过期或被删）时，是否自动开启全新会话重试
+auto_fallback_on_resume_error: true
+
+# 底层 CLI 工具命令映射配置
 commands:
-  codex: codex exec --yolo
-  claude: claude -p
+  codex: "codex exec --dangerously-bypass-approvals-and-sandbox"
+  claude: "claude -p --dangerously-skip-permissions"

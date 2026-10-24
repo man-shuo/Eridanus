@@ -153,8 +153,6 @@ class ImpressionUpdater:
         cfg = YAMLManager.get_instance()
         ccfg = cfg.mai_reply.config.get("context", {})
 
-        # 记忆体系模型优先使用配置中显式指定的 memory_model（兼容 impression_model）
-        explicit_mem_model = str(ccfg.get("memory_model") or ccfg.get("impression_model") or "").strip()
 
         # 读取主回复模型配置作为保底回退
         lcfg = cfg.mai_reply.config.get("llm", {})
@@ -170,16 +168,20 @@ class ImpressionUpdater:
         main_oa_keys = [k for k in (main_keys if isinstance(main_keys, list) else [main_keys]) if k]
 
         # 读取 trigger_llm 配置（专门用于轻量判断与低成本提取记忆槽位/印象）
+        imp_cfg = ccfg.get("Impression") or ccfg.get("impression") or {}
+        slots_cfg = ccfg.get("Slots") or ccfg.get("slots") or {}
+
+        # 记忆体系专用模型（优先读 memory_model 或 impression_model，留空则读 trigger_llm）
         trig_cfg = cfg.mai_reply.config.get("trigger_llm", {}) or {}
-        trig_model = str(trig_cfg.get("model") or "").strip()
+        trig_model =str(trig_cfg.get("model")).strip()
         trig_base_url = str(trig_cfg.get("base_url") or "").strip().rstrip("/")
         trig_api_key = str(trig_cfg.get("api_key") or "").strip()
 
         # 优先级原则：
         # 1. 记忆体系默认且优先使用廉价快速的 trigger_llm 配置（避免调用昂贵的主回复大模型浪费 API 资源）
-        # 2. 若 trigger_llm 未填写 model 且未填写 memory_model，才自动回退到主回复模型配置
-        if trig_model or explicit_mem_model:
-            target_model = explicit_mem_model if explicit_mem_model else trig_model
+        # 2. 若 trigger_llm 未填写 model ，才自动回退到主回复模型配置
+        if trig_model:
+            target_model = trig_model
             target_base_url = trig_base_url if trig_base_url else main_base_url
             chosen_keys = [trig_api_key] if trig_api_key else (main_oa_keys if main_oa_keys else [""])
 
@@ -205,19 +207,32 @@ class ImpressionUpdater:
             self.model = target_model
             self.api_key = trig_api_key or (main_oa_keys[0] if main_oa_keys else "")
             self.base_url = target_base_url
-            logger.info(f"[MaiReply] 记忆槽位与印象更新优先启用 trigger_llm 独立配置: model={self.model}, base_url={self.base_url}")
+            mem_modes = []
+            if getattr(self._ctx, "enable_memory_slots", False) or getattr(self._ctx, "enable_group_memory_slots", False):
+                mem_modes.append("槽位事实(Slots)")
+            if getattr(self._ctx, "enable_impression", False) or getattr(self._ctx, "enable_group_impression", False):
+                mem_modes.append("主观印象(Impression)")
+            mem_tag = "+".join(mem_modes) if mem_modes else "记忆体系"
+            logger.info(f"[MaiReply] {mem_tag}更新优先启用 trigger_llm 独立配置: model={self.model}, base_url={self.base_url}")
         else:
             self._slot_llm = self._main_llm
             self.model = main_model or "gpt-3.5-turbo"
             self.api_key = trig_api_key or (main_oa_keys[0] if main_oa_keys else "")
             self.base_url = main_base_url
-            logger.info(f"[MaiReply] trigger_llm 未配置，记忆槽位与印象更新自动回退使用主回复模型: model={self.model}")
+            mem_modes = []
+            if getattr(self._ctx, "enable_memory_slots", False) or getattr(self._ctx, "enable_group_memory_slots", False):
+                mem_modes.append("槽位事实(Slots)")
+            if getattr(self._ctx, "enable_impression", False) or getattr(self._ctx, "enable_group_impression", False):
+                mem_modes.append("主观印象(Impression)")
+            mem_tag = "+".join(mem_modes) if mem_modes else "记忆体系"
+            logger.info(f"[MaiReply] trigger_llm 未配置，{mem_tag}更新自动回退使用主回复模型: model={self.model}")
 
-        self.max_chars = int(ccfg.get("impression_max_chars", IMPRESSION_MAX_CHARS))
+        self.max_chars = int(imp_cfg.get("impression_max_chars", ccfg.get("impression_max_chars", IMPRESSION_MAX_CHARS)))
         # 用户印象更新轮数（优先读 user_trigger_turns，兼容 impression_trigger_turns）
         # 用户记忆（槽位/印象通用）更新间隔
         self.user_memory_trigger: int = int(
             ccfg.get("user_trigger_turns")
+            or imp_cfg.get("impression_trigger_turns")
             or ccfg.get("impression_trigger_turns")
             or SUMMARY_TRIGGER_TURNS
         )
@@ -230,12 +245,15 @@ class ImpressionUpdater:
             or GROUP_IMP_TRIGGER_MSGS
         )
         self.group_imp_trigger: int = self.group_memory_trigger
-        self.group_imp_max_chars: int = int(ccfg.get("group_max_chars", GROUP_IMP_MAX_CHARS))
+        self.group_imp_max_chars: int = int(imp_cfg.get("group_max_chars", ccfg.get("group_max_chars", GROUP_IMP_MAX_CHARS)))
 
-        self.enable_group_impression: bool = ccfg.get(
-            "enable_group_impression", ccfg.get("enable_impression", True)
+        self.enable_group_impression: bool = bool(
+            getattr(self._ctx, "enable_group_impression", False)
         )
-        self.group_impression_ttl: int = ccfg.get("impression_ttl", 604800)
+        self.enable_impression: bool = bool(
+            getattr(self._ctx, "enable_impression", False)
+        )
+        self.group_impression_ttl: int = int(imp_cfg.get("impression_ttl", ccfg.get("impression_ttl", 604800)))
         # 群聊记忆白名单（通用控制群印象与群生态槽位，兼容旧配置项）
         self.group_memory_whitelist_enabled: bool = bool(
             ccfg.get(
@@ -296,8 +314,10 @@ class ImpressionUpdater:
         return True
 
     def is_group_impression_enabled(self, group_id) -> bool:
-        """向后兼容别名"""
-        return self.is_group_memory_enabled(group_id)
+        """判断指定群是否启用了群印象（仅在 group_memory_mode 包含 impression 且群白名单通过时为 True）"""
+        if hasattr(self._ctx, "is_group_impression_enabled"):
+            return self._ctx.is_group_impression_enabled(group_id)
+        return bool(getattr(self, "enable_group_impression", False)) and self.is_group_memory_enabled(group_id)
 
     def _counter_key(self, user_id: int, group_id) -> str:
         return f"{group_id or 'priv'}:{user_id}"
@@ -746,9 +766,9 @@ class ImpressionUpdater:
     def tick_group(self, group_id: int, group_name: str, bot_name: str) -> None:
         """
         每次有群消息进入旁观窗口时调用。
-        累计到 group_imp_trigger 条时，异步触发群印象更新。
+        累计到 group_memory_trigger 条时，异步触发群记忆（槽位或印象）更新。
         """
-        if not self.is_group_impression_enabled(group_id):
+        if not self.is_group_memory_enabled(group_id):
             return
         self._group_counters[group_id] = self._group_counters.get(group_id, 0) + 1
         if self._group_counters[group_id] >= self.group_imp_trigger:
@@ -760,7 +780,7 @@ class ImpressionUpdater:
     async def _update_group_impression(
         self, group_id: int, group_name: str, bot_name: str
     ) -> None:
-        if not self.is_group_impression_enabled(group_id):
+        if not self.is_group_memory_enabled(group_id):
             return
         try:
             window = self._ctx._load_group_window(group_id)

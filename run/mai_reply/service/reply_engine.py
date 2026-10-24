@@ -428,13 +428,16 @@ class ReplyEngine:
             self.impression_updater.tick(user_id, group_id, user_name, bot_name)
             self.audit_system.tick(user_id, group_id, user_name, bot_name, bot)
 
-            # 群印象更新 tick（有群 ID 且该群启用群印象时触发）
-            if is_group and group_id and self.impression_updater.is_group_impression_enabled(group_id):
+            # 群记忆更新 tick（有群 ID 且该群启用群记忆体系时触发）
+            if is_group and group_id and self.impression_updater.is_group_memory_enabled(group_id):
                 self.impression_updater.tick_group(group_id, group_name, bot_name)
 
             current_score = self.emotion.get_score()
             current_mood = self.emotion.get_mood()
-            current_imp = user_impression or "暂无，还不熟"
+            if user_mem_mode in ("impression", "both"):
+                current_imp = user_impression or "暂无，还不熟"
+            else:
+                current_imp = "已关闭 (当前为 slots 槽位模式)"
 
             panel = (
                 f"\n┌──────── MaiReply 机器人状态监控 ────────┐\n"
@@ -490,61 +493,32 @@ class ReplyEngine:
     # 后台处理语音：翻译 -> TTS 合成 -> 发送
     # =================================================================
     async def _async_tts_and_send(self, bot, event, text: str, voice_cfg: dict):
+        speaker = voice_cfg.get("speaker", "natuki")
         lang_type = voice_cfg.get("lang_type", "JP")
-        speaker = voice_cfg.get("speaker", "MoriCalliope")
         api_key = voice_cfg.get("translate_api_key", "")
-
-        def remove_parentheses_text(text: str) -> str:
-            """去除文本中括号（含内容）的部分，支持全角和半角括号"""
-            # 去除全角括号 （...） 和半角括号 (...)
-            text = re.sub(r'[（(][^）)]*[）)]', '', text)
-            return text.strip()
-        text=remove_parentheses_text(text)
-        translated_text = text
-
-        client = _get_gpt_sovits_client()
-        if client and speaker in client.speakers:
-            audio_path = await client.generate_tts(text)
-            await bot.send(event, Record(file=audio_path))
-            bot.logger.info("[MaiReply] 后台语音发送完成！")
-            return
-
-        if api_key and lang_type.upper() in ["JP", "JA", "EN"]:
-            direction = "zh2ja" if lang_type.upper() in ["JP", "JA"] else "zh2en"
-            headers = {"Authorization": f"Bearer {api_key}"}
-            payload = {"text": text, "direction": direction}
+        if not api_key:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        "http://api.apollodorus.xyz/translate",
-                        json=payload,
-                        headers=headers,
-                        timeout=15
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            translated_text = data.get("translation", text)
-                        else:
-                            bot.logger.warning(f"[MaiReply] 翻译接口异常, HTTP状态码: {resp.status}")
-            except Exception as e:
-                bot.logger.error(f"[MaiReply] 翻译API请求失败: {e}")
+                api_key = self.cfg.mai_reply.config.get("trigger_llm", {}).get("api_key", "")
+            except Exception:
+                api_key = ""
 
         try:
-            from run.mai_reply.service.HoliveTTS import HoliveTTS
-            tts = HoliveTTS()
-            bot.logger.info(f"[MaiReply] 正在后台合成语音 | 角色: {speaker} | 文本: {translated_text}")
-            save_path = f"data/voice/cache/{uuid.uuid4()}.wav"
-            audio_path = await tts.synthesize_to_file(
-                text=translated_text,
+            from run.tts_v2.service.tts import TTS
+            tts_engine = TTS()
+            bot.logger.info(f"[MaiReply] 后台语音合成启动 | speaker: {speaker} | lang: {lang_type} | text: {text[:30]}")
+            audio_path = await tts_engine.tts(
+                text=text,
                 speaker=speaker,
-                language=lang_type.upper(),
-                save_as=save_path
+                config=self.cfg,
+                bot=bot,
+                lang_type=lang_type,
+                api_key=api_key,
             )
-            await bot.send(event, Record(file=audio_path))
-            bot.logger.info("[MaiReply] 后台语音发送完成！")
+            if audio_path:
+                await bot.send(event, Record(file=audio_path))
+                bot.logger.info(f"[MaiReply] 后台语音发送完成: {audio_path}")
         except Exception as e:
-            bot.logger.error(f"[MaiReply] TTS合成或发送发生异常: {e}")
-            traceback.print_exc()
+            bot.logger.error(f"[MaiReply] TTS语音合成或发送失败: {e}", exc_info=True)
 
     # ------------------------------------------------------------------
     # 辅助：获取用户名（带缓存）

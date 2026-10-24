@@ -210,13 +210,30 @@ class MemorySlotManager:
             elif isinstance(config, dict):
                 ccfg = config.get("context", {})
 
-        self.enable: bool = ccfg.get("enable_memory_slots", True)
-        self.global_slot_count: int = int(ccfg.get("global_memory_slot_count", 10))
-        self.user_slot_count: int = int(ccfg.get("user_memory_slot_count", 10))
-        self.slot_max_chars: int = int(ccfg.get("memory_slot_max_chars", 120))
-        self.group_slot_count: int = int(ccfg.get("group_memory_slot_count", 10))
-        self.enable_group_slots: bool = ccfg.get("enable_group_memory_slots", True)
-        self.cache_ttl: int = int(ccfg.get("impression_ttl", 604800))
+        slots_cfg = ccfg.get("Slots") or ccfg.get("slots") or {}
+        imp_cfg = ccfg.get("Impression") or ccfg.get("impression") or {}
+
+        raw_user_mode = str(ccfg.get("user_memory_mode", "")).strip().lower()
+        raw_group_mode = str(ccfg.get("group_memory_mode", "")).strip().lower()
+
+        cfg_slots = bool(slots_cfg.get("enable_memory_slots", ccfg.get("enable_memory_slots", True)))
+        cfg_grp_slots = bool(slots_cfg.get("enable_group_memory_slots", ccfg.get("enable_group_memory_slots", True)))
+
+        if raw_user_mode in ("impression", "none"):
+            self.enable: bool = False
+        else:
+            self.enable: bool = cfg_slots
+
+        if raw_group_mode in ("impression", "none"):
+            self.enable_group_slots: bool = False
+        else:
+            self.enable_group_slots: bool = cfg_grp_slots
+
+        self.global_slot_count: int = int(slots_cfg.get("global_memory_slot_count", ccfg.get("global_memory_slot_count", 10)))
+        self.user_slot_count: int = int(slots_cfg.get("user_memory_slot_count", ccfg.get("user_memory_slot_count", 10)))
+        self.slot_max_chars: int = int(slots_cfg.get("memory_slot_max_chars", ccfg.get("memory_slot_max_chars", 50)))
+        self.group_slot_count: int = int(slots_cfg.get("group_memory_slot_count", ccfg.get("group_memory_slot_count", 10)))
+        self.cache_ttl: int = int(imp_cfg.get("impression_ttl", ccfg.get("impression_ttl", 604800)))
 
         # 确保数据库目录存在并建立 SQLite 连接
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)

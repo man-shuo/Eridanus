@@ -89,14 +89,12 @@ class ContextManager:
         self.max_turns: int = ccfg.get("max_turns", 20)
         self.group_window: int = ccfg.get("group_context_window", 15)
         self.session_ttl: int = ccfg.get("session_ttl", 7200)
-        self.enable_impression: bool = ccfg.get("enable_impression", True)
-        self.impression_ttl: int = ccfg.get("impression_ttl", 604800)
 
-        # 群聊印象配置
-        self.enable_group_impression: bool = ccfg.get(
-            "enable_group_impression", ccfg.get("enable_impression", True)
-        )
-        self.group_impression_ttl: int = ccfg.get("impression_ttl", 604800)
+        imp_cfg = ccfg.get("Impression") or ccfg.get("impression") or {}
+        slots_cfg = ccfg.get("Slots") or ccfg.get("slots") or {}
+
+        self.impression_ttl: int = int(imp_cfg.get("impression_ttl", ccfg.get("impression_ttl", 604800)))
+        self.group_impression_ttl: int = self.impression_ttl
         # 群聊记忆白名单配置（通用支持群生态特征槽位与群整体印象）
         self.group_memory_whitelist_enabled: bool = bool(
             ccfg.get(
@@ -131,23 +129,107 @@ class ContextManager:
         self._ctx_sqlite = SQLitePersistence(ctx_sqlite_path)
         self._imp_sqlite = SQLitePersistence(imp_sqlite_path)
 
-        # 结构化固定记忆槽位层（全局独立生活记忆 + 用户专属长期事实记忆）
-        self.enable_memory_slots: bool = ccfg.get("enable_memory_slots", True)
-        self.enable_group_memory_slots: bool = ccfg.get("enable_group_memory_slots", True)
-        self.group_memory_slot_count: int = int(ccfg.get("group_memory_slot_count", 10))
-        self.user_memory_mode: str = str(ccfg.get("user_memory_mode", "auto")).strip().lower()
-        self.group_memory_mode: str = str(ccfg.get("group_memory_mode", "auto")).strip().lower()
-        self.group_user_context_turns: int = int(ccfg.get("group_user_context_turns", 3))
+        # 记忆模式主控与槽位/印象归一化解析（memory_mode 为最高主控，slots 与 impression 严格互斥，仅 both 时兼备）
+        self.group_memory_slot_count: int = int(slots_cfg.get("group_memory_slot_count", ccfg.get("group_memory_slot_count", 10)))
+        self.group_user_context_turns: int = int(slots_cfg.get("group_user_context_turns", ccfg.get("group_user_context_turns", 3)))
         self._warned_user_mode: bool = False
         self._warned_group_mode: bool = False
+
+        # 1. 用户记忆模式解析与归一化（优先从嵌套的 Impression/Slots 提取，兼顾扁平配置）
+        raw_user_mode = str(ccfg.get("user_memory_mode", "")).strip().lower()
+        cfg_imp = bool(imp_cfg.get("enable_impression", ccfg.get("enable_impression", False)))
+        cfg_slots = bool(slots_cfg.get("enable_memory_slots", ccfg.get("enable_memory_slots", True)))
+
+        if raw_user_mode == "slots":
+            self.user_memory_mode = "slots"
+            self.enable_memory_slots = cfg_slots
+            self.enable_impression = False
+            if cfg_imp:
+                logger.warning("[MaiReply] user_memory_mode 设为 'slots'，主观印象(Impression)配置视同关闭以节省API token。")
+        elif raw_user_mode == "impression":
+            self.user_memory_mode = "impression"
+            self.enable_memory_slots = False
+            self.enable_impression = cfg_imp
+            if cfg_slots:
+                logger.warning("[MaiReply] user_memory_mode 设为 'impression'，记忆槽位(Slots)配置视同关闭。")
+        elif raw_user_mode == "both":
+            self.user_memory_mode = "both"
+            self.enable_memory_slots = cfg_slots
+            self.enable_impression = cfg_imp
+        elif raw_user_mode == "none":
+            self.user_memory_mode = "none"
+            self.enable_memory_slots = False
+            self.enable_impression = False
+        else:
+            if cfg_slots and cfg_imp:
+                self.user_memory_mode = "slots"
+                self.enable_memory_slots = True
+                self.enable_impression = False
+                logger.warning("[MaiReply] 未显式配置 user_memory_mode，默认采用 'slots' 并视同关闭主观印象以节省API token。")
+            elif cfg_slots:
+                self.user_memory_mode = "slots"
+                self.enable_memory_slots = True
+                self.enable_impression = False
+            elif cfg_imp:
+                self.user_memory_mode = "impression"
+                self.enable_memory_slots = False
+                self.enable_impression = True
+            else:
+                self.user_memory_mode = "none"
+                self.enable_memory_slots = False
+                self.enable_impression = False
+
+        # 2. 群聊记忆模式解析与归一化（优先从嵌套的 Impression/Slots 提取，兼顾扁平配置）
+        raw_group_mode = str(ccfg.get("group_memory_mode", "")).strip().lower()
+        cfg_grp_imp = bool(imp_cfg.get("enable_group_impression", ccfg.get("enable_group_impression", False)))
+        cfg_grp_slots = bool(slots_cfg.get("enable_group_memory_slots", ccfg.get("enable_group_memory_slots", True)))
+
+        if raw_group_mode == "slots":
+            self.group_memory_mode = "slots"
+            self.enable_group_memory_slots = cfg_grp_slots
+            self.enable_group_impression = False
+            if cfg_grp_imp:
+                logger.warning("[MaiReply] group_memory_mode 设为 'slots'，群印象(Group Impression)配置视同关闭以节省API token。")
+        elif raw_group_mode == "impression":
+            self.group_memory_mode = "impression"
+            self.enable_group_memory_slots = False
+            self.enable_group_impression = cfg_grp_imp
+            if cfg_grp_slots:
+                logger.warning("[MaiReply] group_memory_mode 设为 'impression'，群生态槽位(Group Slots)配置视同关闭。")
+        elif raw_group_mode == "both":
+            self.group_memory_mode = "both"
+            self.enable_group_memory_slots = cfg_grp_slots
+            self.enable_group_impression = cfg_grp_imp
+        elif raw_group_mode == "none":
+            self.group_memory_mode = "none"
+            self.enable_group_memory_slots = False
+            self.enable_group_impression = False
+        else:
+            if cfg_grp_slots and cfg_grp_imp:
+                self.group_memory_mode = "slots"
+                self.enable_group_memory_slots = True
+                self.enable_group_impression = False
+                logger.warning("[MaiReply] 未显式配置 group_memory_mode，默认采用 'slots' 并视同关闭群印象以节省API token。")
+            elif cfg_grp_slots:
+                self.group_memory_mode = "slots"
+                self.enable_group_memory_slots = True
+                self.enable_group_impression = False
+            elif cfg_grp_imp:
+                self.group_memory_mode = "impression"
+                self.enable_group_memory_slots = False
+                self.enable_group_impression = True
+            else:
+                self.group_memory_mode = "none"
+                self.enable_group_memory_slots = False
+                self.enable_group_impression = False
+
         self.memory_slots = MemorySlotManager(
             db_path=imp_sqlite_path,
             cache_manager=self._imp_cache,
             config=config,
         )
-        # 初始化时检查记忆模式，若有冲突提前在日志中发出 warning 提醒
-        self.get_effective_user_memory_mode()
-        self.get_effective_group_memory_mode()
+        self.memory_slots.enable = self.enable_memory_slots
+        self.memory_slots.enable_group_slots = self.enable_group_memory_slots
 
     # ------------------------------------------------------------------ 内部读写辅助（带双层 fallback）
 
@@ -493,11 +575,15 @@ class ContextManager:
         return True
 
     def is_group_impression_enabled(self, group_id: int) -> bool:
-        """兼容历史调用的别名"""
+        """判断指定群是否启用了群印象（仅在 group_memory_mode 包含 impression 且群白名单通过时为 True）"""
+        if not self.enable_group_impression:
+            return False
         return self.is_group_memory_enabled(group_id)
 
     def get_group_impression(self, group_id: int) -> str:
-        """获取对某个群的整体氛围/主观印象"""
+        """获取对某个群的整体氛围/主观印象（仅在启用群印象时有效）"""
+        if not self.enable_group_impression:
+            return ''
         if not self.is_group_memory_enabled(group_id):
             return ''
         raw = self._imp_get(self._group_impression_key(group_id))
@@ -531,74 +617,22 @@ class ContextManager:
     def get_effective_user_memory_mode(self) -> str:
         """
         解析当前生效的用户记忆模式：
-        - 仅开启 slots: "slots"
-        - 仅开启 impression: "impression"
-        - 两者皆开启: 根据 user_memory_mode ("slots", "impression", "both") 决定，默认 "slots"。
-          若模式不为 both（如为 slots），则视同 impression 关闭并记录警告日志，避免浪费 API token。
-        - 两者皆关闭: "none"（保底方案，二者均不注入、不更新）
+        - slots: 仅启用结构化槽位事实，主观印象彻底关闭；
+        - impression: 仅启用主观印象，槽位事实彻底关闭；
+        - both: 两者兼备；
+        - none: 彻底关闭记忆。
         """
-        slots_on = bool(self.enable_memory_slots)
-        imp_on = bool(self.enable_impression)
-        if slots_on and imp_on:
-            mode = self.user_memory_mode
-            if mode == "slots":
-                if not getattr(self, "_warned_user_mode", False):
-                    logger.warning("[MaiReply] 同时开启了 enable_impression 与 enable_memory_slots，但 user_memory_mode 为 'slots'，主观印象(Impression)视同关闭，避免浪费API token。")
-                    self._warned_user_mode = True
-                return "slots"
-            elif mode == "impression":
-                if not getattr(self, "_warned_user_mode", False):
-                    logger.warning("[MaiReply] 同时开启了 enable_impression 与 enable_memory_slots，但 user_memory_mode 为 'impression'，记忆槽位(Slots)视同关闭。")
-                    self._warned_user_mode = True
-                return "impression"
-            elif mode == "both":
-                return "both"
-            else:
-                if not getattr(self, "_warned_user_mode", False):
-                    logger.warning(f"[MaiReply] 未知的 user_memory_mode '{mode}'，默认采用 'slots' 并视同关闭主观印象。")
-                    self._warned_user_mode = True
-                return "slots"
-        elif slots_on:
-            return "slots"
-        elif imp_on:
-            return "impression"
-        return "none"
+        return getattr(self, "user_memory_mode", "slots")
 
     def get_effective_group_memory_mode(self) -> str:
         """
         解析当前生效的群聊记忆模式：
-        - 仅开启 slots: "slots"
-        - 仅开启 impression: "impression"
-        - 两者皆开启: 根据 group_memory_mode ("slots", "impression", "both") 决定，默认 "slots"。
-          若模式不为 both（如为 slots），则视同 group impression 关闭并记录警告日志，避免浪费 API token。
-        - 两者皆关闭: "none"（保底方案，二者均不注入、不更新）
+        - slots: 仅启用群生态10槽位，群整体印象彻底关闭；
+        - impression: 仅启用群整体印象，群生态槽位彻底关闭；
+        - both: 两者兼备；
+        - none: 彻底关闭群记忆。
         """
-        slots_on = bool(getattr(self, "enable_group_memory_slots", False))
-        imp_on = bool(self.enable_group_impression)
-        if slots_on and imp_on:
-            mode = self.group_memory_mode
-            if mode == "slots":
-                if not getattr(self, "_warned_group_mode", False):
-                    logger.warning("[MaiReply] 同时开启了 enable_group_impression 与 enable_group_memory_slots，但 group_memory_mode 为 'slots'，群印象(Group Impression)视同关闭，避免浪费API token。")
-                    self._warned_group_mode = True
-                return "slots"
-            elif mode == "impression":
-                if not getattr(self, "_warned_group_mode", False):
-                    logger.warning("[MaiReply] 同时开启了 enable_group_impression 与 enable_group_memory_slots，但 group_memory_mode 为 'impression'，群槽位(Group Slots)视同关闭。")
-                    self._warned_group_mode = True
-                return "impression"
-            elif mode == "both":
-                return "both"
-            else:
-                if not getattr(self, "_warned_group_mode", False):
-                    logger.warning(f"[MaiReply] 未知的 group_memory_mode '{mode}'，默认采用 'slots' 并视同关闭群印象。")
-                    self._warned_group_mode = True
-                return "slots"
-        elif slots_on:
-            return "slots"
-        elif imp_on:
-            return "impression"
-        return "none"
+        return getattr(self, "group_memory_mode", "slots")
 
     def get_group_memory_slots(self, group_id: int) -> str:
         """获取群专属结构化固定记忆槽位文本（用于 prompt 注入）"""
