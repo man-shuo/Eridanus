@@ -32,7 +32,7 @@ tarot:
       - data/pictures/tarot/hidden_tarot/vlt.jpg: ""
 搜图:
   search_image_resource_operate_level: 0  #图片搜索功能所需等级
-  nsfw_search_operate_level: 0 #本子和av搜索
+  nsfw_search_operate_level: 1 #av搜索所需权限
   聚合搜图: true          #搜单图
   soutu_bot: true       #搜本子
   avscan: true          #AVScan 截图搜番号
