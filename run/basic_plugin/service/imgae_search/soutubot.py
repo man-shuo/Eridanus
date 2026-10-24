@@ -5,27 +5,32 @@ import time
 import json
 import urllib.parse
 from typing import Optional, Dict, Any, List, Union
-import requests
 import asyncio
+import httpx
 from PIL import Image as PILImage
 
 API_URL = "https://soutubot.moe/api/search"
 BASE_URL = "https://soutubot.moe"
 
-try:
-    from framework_common.ToolKits.util import Util
-    tool = Util.get_instance()
-    USER_AGENT = tool.network.random_headers().get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-except Exception:
-    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+# 采用现代浏览器 User-Agent，避免触发 Cloudflare WAF 403 拦截
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
 BROWSER_HEADERS = {
-    "User-Agent": USER_AGENT,
+    "User-Agent": DEFAULT_USER_AGENT,
+    "Accept": "application/json",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Origin": BASE_URL,
+    "Referer": BASE_URL + "/",
+    "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
 }
 
 IMAGE_HEADERS = {
-    **BROWSER_HEADERS,
+    "User-Agent": DEFAULT_USER_AGENT,
     "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     "Referer": BASE_URL + "/",
 }
@@ -153,66 +158,110 @@ def _parse_soutubot_response(payload: dict) -> List[Dict[str, Any]]:
     return items
 
 
-def _do_search(session: requests.Session, image_data: bytes,
-               factor: float = 1.2, proxy: Optional[str] = None) -> Dict[str, Any]:
-    """
-    发送图片二进制给 soutubot.moe 新版 API 并返回统一格式结果。
-    新版前端不再需要 window.GLOBAL.m 也不再需要 x-api-key。
-    """
-    headers = {
-        **BROWSER_HEADERS,
-        "Accept": "application/json",
-        "Origin": BASE_URL,
-        "Referer": BASE_URL + "/",
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
+def _get_client_kwargs(proxy: Optional[str] = None, http2: bool = True) -> Dict[str, Any]:
+    """构建 httpx 客户端参数，支持不同版本 httpx 的代理配置"""
+    kwargs: Dict[str, Any] = {
+        "http2": http2,
+        "timeout": 30.0,
+        "follow_redirects": True,
     }
+    if proxy and str(proxy).strip():
+        proxy_url = str(proxy).strip()
+        try:
+            # httpx >= 0.24 采用 proxy 参数
+            kwargs["proxy"] = proxy_url
+        except Exception:
+            kwargs["proxies"] = {"all://": proxy_url}
+    return kwargs
 
+
+async def _async_do_search(image_data: bytes, factor: float = 1.2, proxy: Optional[str] = None) -> Dict[str, Any]:
+    """
+    异步发送图片二进制给 soutubot.moe 新版 API。
+    使用 HTTP/2 协议避免 Cloudflare WAF 403 Forbidden 拦截。
+    """
     prepared_data = _prepare_image_data(image_data)
     files = {"file": ("image.png", prepared_data, "image/png")}
     data = {"factor": str(factor), "metadata_mode": "display", "top_k": "25"}
-    proxies = {"http": proxy, "https": proxy} if proxy else None
 
-    resp = session.post(API_URL, headers=headers, files=files, data=data, proxies=proxies, timeout=30)
-    resp.raise_for_status()
+    # 优先尝试 HTTP/2，若代理环境不支持 HTTP/2 则降级重试 HTTP/1.1
+    for use_h2 in [True, False]:
+        kwargs = _get_client_kwargs(proxy=proxy, http2=use_h2)
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                resp = await client.post(API_URL, headers=BROWSER_HEADERS, files=files, data=data)
+                if resp.status_code == 403 and use_h2:
+                    continue
+                resp.raise_for_status()
+                raw_json = resp.json()
+                parsed_items = _parse_soutubot_response(raw_json)
+                return {
+                    "data": parsed_items,
+                    "raw": raw_json,
+                    "results": raw_json.get("results", [])
+                }
+        except Exception as e:
+            if use_h2:
+                continue
+            raise e
 
-    raw_json = resp.json()
-    parsed_items = _parse_soutubot_response(raw_json)
-    return {
-        "data": parsed_items,
-        "raw": raw_json,
-        "results": raw_json.get("results", [])
-    }
+    raise RuntimeError("soutubot 请求未返回有效结果")
+
+
+def _do_search(image_data: bytes, factor: float = 1.2, proxy: Optional[str] = None) -> Dict[str, Any]:
+    """
+    同步发送图片二进制给 soutubot.moe 新版 API。
+    """
+    prepared_data = _prepare_image_data(image_data)
+    files = {"file": ("image.png", prepared_data, "image/png")}
+    data = {"factor": str(factor), "metadata_mode": "display", "top_k": "25"}
+
+    for use_h2 in [True, False]:
+        kwargs = _get_client_kwargs(proxy=proxy, http2=use_h2)
+        try:
+            with httpx.Client(**kwargs) as client:
+                resp = client.post(API_URL, headers=BROWSER_HEADERS, files=files, data=data)
+                if resp.status_code == 403 and use_h2:
+                    continue
+                resp.raise_for_status()
+                raw_json = resp.json()
+                parsed_items = _parse_soutubot_response(raw_json)
+                return {
+                    "data": parsed_items,
+                    "raw": raw_json,
+                    "results": raw_json.get("results", [])
+                }
+        except Exception as e:
+            if use_h2:
+                continue
+            raise e
+
+    raise RuntimeError("soutubot 请求未返回有效结果")
 
 
 def search_by_image(image_path: str, factor: float = 1.2, proxy: Optional[str] = None) -> Dict[str, Any]:
-    """以本地图片路径搜索。"""
+    """以本地图片路径搜索（同步）。"""
     target_path = get_local_file_path(image_path)
     with open(target_path, "rb") as f:
         image_data = f.read()
-
-    session = requests.Session()
-    return _do_search(session, image_data, factor=factor, proxy=proxy)
+    return _do_search(image_data, factor=factor, proxy=proxy)
 
 
 def search_by_url(image_url: str, factor: float = 1.2, proxy: Optional[str] = None) -> Dict[str, Any]:
-    """先下载远程图片，再调用搜索。"""
-    session = requests.Session()
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-
+    """先下载远程图片，再调用搜索（同步）。"""
+    kwargs = _get_client_kwargs(proxy=proxy, http2=True)
     print(f"[*] 下载图片: {image_url}")
-    img_resp = session.get(image_url, headers=IMAGE_HEADERS, proxies=proxies, timeout=20)
-    img_resp.raise_for_status()
+    with httpx.Client(**kwargs) as client:
+        img_resp = client.get(image_url, headers=IMAGE_HEADERS)
+        img_resp.raise_for_status()
+        content = img_resp.content
 
-    return _do_search(session, img_resp.content, factor=factor, proxy=proxy)
+    return _do_search(content, factor=factor, proxy=proxy)
 
 
 def search_img_by_path_or_url(target: str, factor: float = 1.2, proxy: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    综合入口：支持本地路径与远程 URL，返回解析好的结果列表（用于 image_search.py）。
+    综合入口（同步）：支持本地路径与远程 URL，返回解析好的结果列表（用于 image_search.py）。
     """
     try:
         if target.startswith("http://") or target.startswith("https://"):
@@ -233,10 +282,28 @@ def search_img_by_path_or_url(target: str, factor: float = 1.2, proxy: Optional[
 
 async def async_search_by_image(image_path: str, factor: float = 1.2, proxy: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    异步包装：本地图片搜索
+    异步包装：本地图片搜索，优先使用原生异步 HTTP/2 客户端
     """
-    result = await asyncio.to_thread(search_img_by_path_or_url, image_path, factor, proxy)
-    return result
+    try:
+        target = get_local_file_path(image_path)
+        if target.startswith("http://") or target.startswith("https://"):
+            kwargs = _get_client_kwargs(proxy=proxy, http2=True)
+            async with httpx.AsyncClient(**kwargs) as client:
+                img_resp = await client.get(target, headers=IMAGE_HEADERS)
+                img_resp.raise_for_status()
+                img_bytes = img_resp.content
+            res = await _async_do_search(img_bytes, factor=factor, proxy=proxy)
+            return res.get("data", [])
+        else:
+            with open(target, "rb") as f:
+                img_bytes = f.read()
+            res = await _async_do_search(img_bytes, factor=factor, proxy=proxy)
+            return res.get("data", [])
+    except Exception as e:
+        import traceback
+        print(f"[x] 异步搜索失败: {e}")
+        traceback.print_exc()
+        return []
 
 
 def print_results(result: Union[Dict[str, Any], List[Dict[str, Any]]]):
