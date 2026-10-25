@@ -15,7 +15,7 @@
     "search_with_official_api",
     "search_book_info",
     "call_download_book",
-    "iwara_tendency",
+    "iwara_tendency"
   ],
   "disabled_skills": [
     "reply-live-test"
