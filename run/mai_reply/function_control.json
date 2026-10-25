@@ -13,7 +13,11 @@
     "get_all_speakers",
     "operate_group_censor",
     "parse_cloud_music",
-    "search_with_official_api"
+    "search_with_official_api",
+    "search_book_info",
+    "call_download_book",
+    "iwara_tendency",
+    "run_cli_tool"
   ],
   "disabled_skills": [
     "reply-live-test"
