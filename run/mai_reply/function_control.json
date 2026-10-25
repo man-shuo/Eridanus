@@ -7,7 +7,6 @@
     "call_clear_all_history",
     "call_delete_user_history",
     "call_fortune",
-    "call_tts",
     "call_user_data_query",
     "garbage_collection",
     "get_all_speakers",
@@ -17,7 +16,6 @@
     "search_book_info",
     "call_download_book",
     "iwara_tendency",
-    "run_cli_tool"
   ],
   "disabled_skills": [
     "reply-live-test"
