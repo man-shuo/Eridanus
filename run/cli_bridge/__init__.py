@@ -1,11 +1,16 @@
 ﻿# -*- coding: utf-8 -*-
 plugin_description = "Codex / Claude CLI 自动化终端中介桥梁"
 
-from .main import run_cli_tool
+# 框架动态导入工具函数。这是新的导入方式，因webui暂未适配，暂不启用
+#from .main import run_cli_tool
 
-# 供框架动态导入工具函数
-dynamic_imports = [run_cli_tool]
+#dynamic_imports = [run_cli_tool]
 
+dynamic_imports={
+    "run.cli_bridge.main": [
+        "run_cli_tool"
+    ]
+}
 # Gemini / OpenAI Function Calling 声明规范
 function_declarations = [
     {
