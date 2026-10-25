@@ -349,8 +349,13 @@ def main(bot: ExtendBot, config: YAMLManager):
     @bot.on(GroupMessageEvent)
     async def search_image(event):
         text = str(event.pure_text).strip()
-        is_search_command = any(k in text for k in ["搜图", "搜番号", "查番号", "avscan", "搜车牌"]) or (
-            event.get("at") and event.get("at")[0]["qq"] == str(bot.id) and event.get("text") and any(k in event.get("text")[0] for k in ["搜图", "搜番号"])
+        commands = {"搜图", "搜番号", "查番号", "avscan", "搜车牌"}
+
+        is_search_command = text in commands or (
+                event.get("at")
+                and str(event.get("at")[0]["qq"]) == str(bot.id)
+                and event.get("text")
+                and any(k == str(event.get("text")[0]).strip() for k in {"搜图", "搜番号"})
         )
 
         try:
