@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 import json
 import random
@@ -236,7 +236,9 @@ def main(bot, config):
                 bot.logger.warning(f"Character Detection: 禁言用户失败: {e}")
 
     async def detection_worker():
+        import gc
         loop = asyncio.get_running_loop()
+        processed_count = 0
         while True:
             item = await task_queue.get()
             try:
@@ -255,6 +257,9 @@ def main(bot, config):
                         bot.logger.info(f"Character Detection: 命中 {base_action_info[t]['tag']} (群: {event.group_id})")
                         await execute_penalty(t, event)
                         break
+                processed_count += 1
+                if processed_count % 10 == 0:
+                    gc.collect()
             except Exception as e:
                 bot.logger.error(f"Character Detection worker 出错: {e}")
             finally:

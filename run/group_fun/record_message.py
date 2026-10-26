@@ -9,6 +9,15 @@ from datetime import datetime, timedelta
 # 构建分隔符正则表达式 
 separators_pattern = '|'.join(re.escape(sep) for sep in ["|", "｜"])
 message_list_global = {}
+_MAX_RECORD_CACHE = 1000
+
+def _record_cache_set(msg_id, img_path):
+    global message_list_global
+    if len(message_list_global) >= _MAX_RECORD_CACHE:
+        drop_keys = list(message_list_global.keys())[:200]
+        for k in drop_keys:
+            message_list_global.pop(k, None)
+    message_list_global[msg_id] = img_path
 
 
 
@@ -61,7 +70,7 @@ def main(bot, config):
         random_file = random.choice(files)
         message_id_info = await bot.send(event, Image(file=f'{img_path_save}/{random_file}'))
         if message_id_info is not None:
-            message_list_global[message_id_info['data']['message_id']] = f'{img_path_save}/{random_file}'
+            _record_cache_set(message_id_info['data']['message_id'], f'{img_path_save}/{random_file}')
 
     @bot.on(GroupMessageEvent)
     async def record_message_delete(event: GroupMessageEvent):
@@ -150,7 +159,7 @@ def main(bot, config):
         img_path = await manshuo_draw(draw_list)
         message_id_info = await bot.send(event, Image(file=img_path))
         if message_id_info is not None:
-            message_list_global[message_id_info['data']['message_id']] = f'{img_path}'
+            _record_cache_set(message_id_info['data']['message_id'], f'{img_path}')
 
 
 
@@ -235,7 +244,7 @@ def main(bot, config):
         img_path = await manshuo_draw(draw_list)
         message_id_info = await bot.send(event, Image(file=img_path))
         if message_id_info is not None:
-            message_list_global[message_id_info['data']['message_id']] = f'{img_path}'
+            _record_cache_set(message_id_info['data']['message_id'], f'{img_path}')
 
 
 
