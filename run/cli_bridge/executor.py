@@ -92,7 +92,11 @@ def is_session_expired_error(output: str) -> bool:
         "cannot find session",
         "no session found",
         "unknown session",
-        "session expired"
+        "session expired",
+        "no rollout found",
+        "thread/resume failed",
+        "no conversation found",
+        "does not match any session"
     ]
     return any(k in lower for k in keywords)
 
@@ -262,11 +266,6 @@ async def run_cli_command(
         stderr_text = decode_bytes(stderr_bytes)
         combined_text = (stdout_text + "\n" + stderr_text).strip()
 
-        # 尝试从 stderr / stdout 中捕获 session id 并保存
-        captured_session_id = extract_session_id(stderr_text) or extract_session_id(stdout_text)
-        if captured_session_id and session_key:
-            save_session(session_key, captured_session_id, prompt)
-
         # 检查是否因为旧 session 失效导致 resume 失败
         if is_resume and auto_fallback and returncode != 0 and is_session_expired_error(combined_text):
             clear_session(session_key)
@@ -281,6 +280,13 @@ async def run_cli_command(
                 auto_fallback=False
             )
             return f"[提示：检测到旧会话已失效，已自动为您重置并开启新会话]\n\n" + retry_res
+
+        # 仅在命令执行成功（returncode == 0）时保存捕获的 session id
+        # 避免在 resume 失败时，将报错信息中回显的失效 UUID 再次捕获并保存进会话记录
+        if returncode == 0:
+            captured_session_id = extract_session_id(stderr_text) or extract_session_id(stdout_text)
+            if captured_session_id and session_key:
+                save_session(session_key, captured_session_id, prompt)
 
         # 优先读取 codex 的 last message 纯净输出文件
         last_message_content = ""
