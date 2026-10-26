@@ -207,8 +207,7 @@ def main(bot, config):
                         multimodal_content=None,
                         triggered_by_llm=True,     # 限制回复长度，保持对话精炼
                         include_tools=False,       # 表情包反击无需调用外部工具
-                        system_prompt_prefix=system_prompt_prefix,
-                        ignore_permission=True,    # 惩罚反击不受普通发言权限门槛限制
+                        system_prompt_prefix=system_prompt_prefix
                     )
                     ai_replied = True
                 finally:
