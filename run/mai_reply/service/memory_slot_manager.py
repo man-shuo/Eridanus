@@ -29,7 +29,7 @@ DEFAULT_USER_SLOT_BLUEPRINTS = [
     {
         "slot_id": 1,
         "category": "基础个人档案",
-        "description": "城市/常住地/留学地、时区时差（如莫斯科UTC+3比国内慢5小时）、学校学历、年龄、性别称谓等基础常住信息",
+        "description": "城市/常住地/留学地、时区时差、学校学历、年龄、性别称谓等基础常住信息",
     },
     {
         "slot_id": 2,
