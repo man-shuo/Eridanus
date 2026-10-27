@@ -164,8 +164,43 @@ class ProactiveService:
         if self.is_user_in_cooldown(user_id, cooldown_hours):
             return False, ""
 
-        # 计算距离用户最后一次说话的时间
+        # 区分真实用户发言与系统/主动关怀占位记录
+        def _is_real_user_msg(m: Dict) -> bool:
+            return m.get("role") == "user" and m.get("content") != "[你主动发起关怀]"
+
+        real_user_msgs = [m for m in history if _is_real_user_msg(m)]
         now_ts = time.time()
+
+        # -------------------------------------------------------------
+        # 1. 忽略不活跃/少互动用户过滤（核心保护：避免打扰路人，杜绝 Token 浪费）
+        # -------------------------------------------------------------
+        ignore_inactive = bool(cfg.get("ignore_inactive_users", True))
+        if ignore_inactive:
+            # 门槛 1：真实私聊发言次数检查（过滤只发过一两句或仅测试指令的用户）
+            min_user_messages = int(cfg.get("min_user_messages", 3))
+            if len(real_user_msgs) < min_user_messages:
+                return False, ""
+
+            # 门槛 2：检查上次主动关怀后用户是否有回复（防单方面死循环骚扰与白白耗费 Token）
+            if bool(cfg.get("require_user_reply_after_proactive", True)):
+                last_proactive_idx = -1
+                for idx, m in enumerate(history):
+                    if m.get("content") == "[你主动发起关怀]":
+                        last_proactive_idx = idx
+                if last_proactive_idx != -1:
+                    replied_after = any(_is_real_user_msg(m) for m in history[last_proactive_idx + 1:])
+                    if not replied_after:
+                        return False, ""
+
+            # 门槛 3：用户最近真实发言时效（超过最大未互动天数视为冷用户）
+            max_inactive_days = float(cfg.get("max_inactive_days", 3))
+            if real_user_msgs:
+                last_user_msg = real_user_msgs[-1]
+                last_user_ts = float(last_user_msg.get("ts") or last_user_msg.get("timestamp") or 0)
+                if last_user_ts > 0 and (now_ts - last_user_ts) > (max_inactive_days * 86400):
+                    return False, ""
+
+        # 计算距离用户最后一次说话的时间
         last_msg = history[-1]
         last_ts = float(last_msg.get("ts") or last_msg.get("timestamp") or now_ts)
         silence_seconds = now_ts - last_ts
@@ -180,9 +215,15 @@ class ProactiveService:
         if silence_seconds > (max_idle_days * 86400):
             return False, ""
 
+        # 如果有真实用户记录，检查真实用户距离现在的时间是否也在 max_idle_days 内
+        if real_user_msgs:
+            last_user_ts = float(real_user_msgs[-1].get("ts") or real_user_msgs[-1].get("timestamp") or 0)
+            if last_user_ts > 0 and (now_ts - last_user_ts) > (max_idle_days * 86400):
+                return False, ""
+
         # 提取用户常活跃时段
-        user_msgs = [m for m in history if m.get("role") == "user"][-30:]
-        preferred_count = sum(1 for m in user_msgs if m.get("hour") == hour)
+        preferred_user_msgs = real_user_msgs[-30:] if real_user_msgs else [m for m in history if m.get("role") == "user"][-30:]
+        preferred_count = sum(1 for m in preferred_user_msgs if m.get("hour") == hour)
 
         # 预设推荐时段检查
         periods = cfg.get("periods", {
