@@ -100,6 +100,8 @@ def main(bot: ExtendBot, config):
         logger.info_func(f"执行任务：{task_name}, 信息:{task_info}")
 
         if task_name == "晚安问候":
+            night_cfg = config.scheduled_tasks.config.get("scheduledTasks", {}).get("晚安问候", {})
+            interval = float(night_cfg.get("request_interval", 6.0))
             friend_list = (await bot.get_friend_list())["data"]
             if config.scheduled_tasks.config["scheduledTasks"]["晚安问候"]["onlyTrustUser"]:
                 user_ids = await get_users_with_permission_above(
@@ -119,7 +121,8 @@ def main(bot: ExtendBot, config):
                         await engine.handle(
                             bot, event,
                             "现在是睡前时间。请像你自己想起这位用户一样，自然地道一声晚安，保持平时的角色和说话习惯，可以结合最近的对话表达关心。不要提及定时任务、系统提示或要求用户回复。")
-                        await sleep(6)
+                        if interval > 0:
+                            await sleep(interval)
                         continue
                     await bot.send_friend_message(int(user["user_id"]), r)
                     await sleep(6)
@@ -128,6 +131,8 @@ def main(bot: ExtendBot, config):
             logger.info_func("晚安问候任务执行完毕")
 
         elif task_name == "早安问候":
+            morning_cfg = config.scheduled_tasks.config.get("scheduledTasks", {}).get("早安问候", {})
+            interval = float(morning_cfg.get("request_interval", 6.0))
             friend_list = (await bot.get_friend_list())["data"]
             if config.scheduled_tasks.config["scheduledTasks"]["早安问候"]["onlyTrustUser"]:
                 user_ids = await get_users_with_permission_above(
@@ -155,7 +160,8 @@ def main(bot: ExtendBot, config):
                         event = AnyEvent()
                         event.user_id = int(user["user_id"])
                         await engine.handle(bot, event, prompt)
-                        await sleep(6)
+                        if interval > 0:
+                            await sleep(interval)
                         continue
                     await bot.send_friend_message(int(user["user_id"]), r)
                     await sleep(6)

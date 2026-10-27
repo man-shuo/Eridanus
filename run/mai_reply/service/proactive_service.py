@@ -478,6 +478,7 @@ class ProactiveService:
 
         current_hour = datetime.now().hour
         enable_search = bool(cfg.get("enable_search", True))
+        request_interval = float(cfg.get("request_interval", 10.0))
 
         for uid in users:
             try:
@@ -532,8 +533,9 @@ class ProactiveService:
                 # 发送
                 await self.send_proactive_care(bot, uid, segments)
 
-                # 间隔，避免瞬时并发打爆
-                await asyncio.sleep(5)
+                # 间隔，避免瞬时并发打爆上游 RPM 限制
+                if request_interval > 0:
+                    await asyncio.sleep(request_interval)
 
             except Exception as e:
                 logger.error(f"[MaiReply Proactive] 巡检处理用户 {uid} 发生异常: {e}", exc_info=True)

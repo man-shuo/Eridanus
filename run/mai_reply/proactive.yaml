@@ -10,6 +10,7 @@ scan_interval_minutes: 30       # 巡检循环间隔（分钟）
 interval_minutes: 30            # 兼容旧字段
 enable_search: true             # 是否在关怀时支持联网搜索（如天气、资讯）
 enable_tts: true                # 是否允许主动消息发送语音
+request_interval: 15            # 主动问候单轮巡检中，不同用户之间的请求触发间隔（秒），防止触发上游RPM限制
 periods:
   morning: [7, 10]
   after_work: [17, 20]
