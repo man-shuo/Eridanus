@@ -364,7 +364,7 @@ class MilkyAdapter:
             basic = cfg.basic_config
             if hasattr(event_obj, "group_id") and event_obj.group_id is not None:
                 grp_logic = basic.get("group_handle_logic", "blacklist")
-                censor_grp = cfg.censor_group.get(grp_logic, [])
+                censor_grp = convert_list_to_type(cfg.censor_group.get(grp_logic, []))
                 if grp_logic == "blacklist" and event_obj.group_id in censor_grp:
                     self.logger.info(f"群 {event_obj.group_id} 在黑名单中，跳过处理。")
                     return
@@ -445,7 +445,7 @@ class MilkyAdapter:
                 self.logger.info(f"Milky 连接成功，当前登录 UIN: {self.id}, 昵称: {info['data'].get('nickname', '')}")
                 meta_event = LifecycleMetaEvent(
                     time=int(time.time()),
-                    sender=self.id,
+                    self_id=self.id,
                     post_type="meta_event",
                     meta_event_type="lifecycle",
                     sub_type="connect"
