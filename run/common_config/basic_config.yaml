@@ -58,11 +58,6 @@ protocol:
       host: "0.0.0.0"
       port: 8082
 
-adapter:
-  name: "any"   #兼容性选项，如果用Lagrange，则必须填Lagrange，用其他onebot实现则不用动
-  ws_client:   #机器人作为websocket客户端
-    ws_link: "ws://127.0.0.1:3001"  #bot的websocket请求地址
-
 PluginLoadConfig: #插件加载配置，根据配置情况调整。会影响插件加载速度。
   load_strategy: "batch_loading" #加载策略，可选batch_loading，all_at_once，memory_aware
   batch_size: 4  # 每批加载的插件数量
