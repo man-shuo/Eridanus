@@ -353,6 +353,9 @@ class MilkyAdapter:
         if not ob_event_dict:
             self.logger.debug(f"Milky 未处理事件类型: {event_type}")
             return
+        if 'self_id' not in ob_event_dict:
+            ob_event_dict['self_id'] = self.self_id
+
 
         event_obj = EventFactory.create_event(ob_event_dict)
         if not event_obj:
