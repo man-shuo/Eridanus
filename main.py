@@ -46,6 +46,7 @@ if protocol_type == "milky":
         api_url=api_url,
         event_ws_url=event_ws_url,
         access_token=access_token,
+        api_timeout=client_cfg.get("api_timeout", 60),
         config=config,
         blocked_loggers=["DEBUG", "INFO_MSG"],
         handler_timeout_warning=handler_timeout_warning,

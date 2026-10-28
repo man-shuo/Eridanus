@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Type, Union, Dict, Optional, List, Any
 
 import httpx
@@ -79,6 +80,7 @@ class MilkyAdapter:
         blocked_loggers = None,
         enable_monitoring: bool = True,
         handler_timeout_warning: float = 10.0,
+        api_timeout: float = 60.0,
         **kwargs
     ):
         self.api_url = api_url.rstrip("/")
@@ -96,12 +98,20 @@ class MilkyAdapter:
         self.receive_task: Optional[asyncio.Task] = None
         self._processing_task: Optional[asyncio.Task] = None
         self._running = False
+        self._message_context = {}
+        self._request_context = {}
 
         headers = {"Content-Type": "application/json"}
         if self.access_token:
             headers["Authorization"] = f"Bearer {self.access_token}"
         # 显式关闭环境变量代理，直连本机 localhost/127.0.0.1
-        self._http_client = httpx.AsyncClient(headers=headers, timeout=30.0, trust_env=False)
+        self._http_client = httpx.AsyncClient(
+            headers=headers, timeout=httpx.Timeout(float(api_timeout), connect=10.0), trust_env=False
+        )
+
+    @property
+    def self_id(self):
+        return self.id
 
     def on(self, event: Type[EventBase]):
         return self.event_bus.on(event)
@@ -127,27 +137,43 @@ class MilkyAdapter:
             if "message_id" in params and "message_seq" not in params:
                 params["message_seq"] = int(params["message_id"])
 
-        url = f"{self.api_url}/api/{endpoint}"
+        api_root = self.api_url if self.api_url.endswith("/api") else f"{self.api_url}/api"
+        url = f"{api_root}/{endpoint}"
         headers = {"Content-Type": "application/json"}
         if self.access_token:
             headers["Authorization"] = f"Bearer {self.access_token}"
 
         try:
-            resp = await self._http_client.post(url, json=params)
+            resp = await self._http_client.post(url, json=params, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
+                if data.get("retcode", 0) != 0 or data.get("status") == "failed":
+                    self.logger.error(f"Milky API [{endpoint}] 失败: {data.get('message', data.get('msg', 'unknown error'))}")
+                    data.setdefault("msg", data.get("message", ""))
                 return data
             else:
                 self.logger.error(f"Milky API [{endpoint}] HTTP 状态码: {resp.status_code}, 内容: {resp.text}")
                 return {"status": "failed", "retcode": resp.status_code, "data": None, "msg": resp.text}
         except Exception as e:
-            self.logger.error(f"Milky API [{endpoint}] 调用失败: {e}")
-            return {"status": "failed", "retcode": -1, "data": None, "msg": str(e)}
+            detail = f"{type(e).__name__}: {e}"
+            self.logger.error(f"Milky API [{endpoint}] 调用失败: {detail}")
+            # Never retry sends automatically: the server may already have sent it.
+            return {"status": "failed", "retcode": -1, "data": None, "msg": detail}
+
+    @staticmethod
+    def _media_uri(value):
+        value = str(value or "")
+        if not value or value.startswith(("http://", "https://", "base64://", "file://")):
+            return value
+        return Path(value).resolve().as_uri()
 
     @staticmethod
     def onebot_to_milky_segments(onebot_segments: list) -> list:
         milky_segs = []
         for seg in onebot_segments:
+            if isinstance(seg, str):
+                milky_segs.append({"type": "text", "data": {"text": seg}})
+                continue
             if isinstance(seg, dict):
                 stype = seg.get("type", "text")
                 sdata = seg.get("data", {})
@@ -163,23 +189,34 @@ class MilkyAdapter:
 
             if stype == "text":
                 milky_segs.append({"type": "text", "data": {"text": str(sdata.get("text", ""))}})
+            elif stype == "node":
+                content = sdata.get("content", [])
+                if not isinstance(content, list):
+                    content = [content]
+                node = {"user_id": int(sdata.get("user_id", 0)),
+                        "sender_name": sdata.get("nickname", "bot"),
+                        "segments": MilkyAdapter.onebot_to_milky_segments(content)}
+                if milky_segs and milky_segs[-1]["type"] == "forward":
+                    milky_segs[-1]["data"]["messages"].append(node)
+                else:
+                    milky_segs.append({"type": "forward", "data": {"messages": [node]}})
             elif stype in ["mention", "at"]:
                 qq = str(sdata.get("qq", sdata.get("user_id", "")))
-                if qq == "all":
+                if qq in ("all", "0"):
                     milky_segs.append({"type": "mention_all", "data": {}})
                 else:
                     milky_segs.append({"type": "mention", "data": {"user_id": int(qq)}})
             elif stype == "face":
-                face_id = sdata.get("id", 0)
+                face_id = sdata.get("face_id", sdata.get("id", 0))
                 milky_segs.append({"type": "face", "data": {"face_id": str(face_id)}})
-            elif stype in ["image", "mface"]:
-                uri = sdata.get("url") or sdata.get("file") or ""
-                milky_segs.append({"type": "image", "data": {"uri": uri}})
+            elif stype in ["image", "mface", "video"]:
+                uri = MilkyAdapter._media_uri(sdata.get("uri") or sdata.get("url") or sdata.get("file"))
+                milky_segs.append({"type": "video" if stype == "video" else "image", "data": {"uri": uri}})
             elif stype == "record":
-                uri = sdata.get("url") or sdata.get("file") or ""
+                uri = MilkyAdapter._media_uri(sdata.get("uri") or sdata.get("url") or sdata.get("file"))
                 milky_segs.append({"type": "record", "data": {"uri": uri}})
             elif stype == "reply":
-                seq = sdata.get("id", 0)
+                seq = sdata.get("message_seq", sdata.get("id", 0))
                 milky_segs.append({"type": "reply", "data": {"message_seq": int(seq)}})
             else:
                 milky_segs.append({"type": stype, "data": sdata})
@@ -218,6 +255,10 @@ class MilkyAdapter:
                 ob_segs.append({"type": "video", "data": {"file": uri, "url": uri}})
             elif stype == "reply":
                 ob_segs.append({"type": "reply", "data": {"id": sdata.get("message_seq", 0)}})
+            elif stype == "file":
+                ob_segs.append({"type": "file", "data": {
+                    "file": sdata.get("file_id", ""), "name": sdata.get("file_name", ""),
+                    "file_id": sdata.get("file_id", ""), "file_size": sdata.get("file_size", 0)}})
             elif stype == "market_face":
                 ob_segs.append({
                     "type": "mface",
@@ -232,6 +273,24 @@ class MilkyAdapter:
                 ob_segs.append({"type": stype, "data": sdata})
         return ob_segs
 
+    async def _resolve_media_segments(self, segments):
+        resolved = []
+        for segment in segments:
+            segment = {**segment, "data": dict(segment.get("data", {}))}
+            media = segment["data"]
+            if segment.get("type") in ("image", "record", "video") and media.get("resource_id") and not media.get("temp_url"):
+                result = await self._call_api("get_resource_temp_url", {"resource_id": media["resource_id"]})
+                if result.get("status") == "ok":
+                    media["temp_url"] = (result.get("data") or {}).get("url", "")
+            resolved.append(segment)
+        return resolved
+
+    def _remember_message(self, sequence, scene, peer_id):
+        contexts = self._message_context.setdefault(int(sequence), set())
+        contexts.add((scene, int(peer_id)))
+        if len(self._message_context) > 4096:
+            self._message_context.pop(next(iter(self._message_context)))
+
     async def _dispatch_milky_event(self, data: dict):
         event_type = data.get("event_type", "")
         event_data = data.get("data", {})
@@ -240,8 +299,9 @@ class MilkyAdapter:
         ob_event_dict = None
 
         if event_type == "message_receive":
-            sender_info = event_data.get("sender", {})
-            milky_segments = event_data.get("segments", [])
+            scene = event_data.get("message_scene", "group" if "group_id" in event_data else "friend")
+            sender_info = event_data.get("group_member") or event_data.get("friend") or event_data.get("sender", {})
+            milky_segments = await self._resolve_media_segments(event_data.get("segments", []))
             ob_message = self.milky_to_onebot_segments(milky_segments)
 
             raw_msg = "".join([
@@ -249,7 +309,7 @@ class MilkyAdapter:
                 else f"[CQ:{s.get('type')}]" for s in ob_message
             ])
 
-            user_id = int(sender_info.get("user_id", 0))
+            user_id = int(event_data.get("sender_id", sender_info.get("user_id", 0)))
             message_seq = int(event_data.get("message_seq", 0))
 
             sender_dict = {
@@ -260,8 +320,8 @@ class MilkyAdapter:
                 "title": sender_info.get("title", ""),
             }
 
-            if "group_id" in event_data:
-                group_id = int(event_data.get("group_id"))
+            if scene == "group":
+                group_id = int(event_data.get("peer_id", event_data.get("group_id", 0)))
                 ob_event_dict = {
                     "post_type": "message",
                     "message_type": "group",
@@ -314,13 +374,18 @@ class MilkyAdapter:
             }
 
         elif event_type in ["group_nudge", "friend_nudge"]:
+            sender_id = event_data.get("sender_id", event_data.get("user_id", 0))
+            target_id = event_data.get("target_id", self.id)
+            if event_type == "friend_nudge":
+                sender_id = self.id if event_data.get("is_self_send") else event_data.get("user_id", 0)
+                target_id = self.id if event_data.get("is_self_receive") else event_data.get("user_id", 0)
             ob_event_dict = {
                 "post_type": "notice",
                 "notice_type": "notify",
                 "sub_type": "poke",
-                "sender_id": int(event_data.get("sender_id", 0)),
-                "user_id": int(event_data.get("sender_id", 0)),
-                "target_id": int(event_data.get("target_id", 0)),
+                "sender_id": int(sender_id),
+                "user_id": int(sender_id),
+                "target_id": int(target_id),
                 "group_id": int(event_data.get("group_id", 0)) if "group_id" in event_data else None,
                 "time": event_time,
                 "adapter_source": "milky",
@@ -333,7 +398,7 @@ class MilkyAdapter:
                 "sub_type": "approve",
                 "group_id": int(event_data.get("group_id", 0)),
                 "user_id": int(event_data.get("user_id", 0)),
-                "operator_id": int(event_data.get("operator_id", 0)),
+                "operator_id": int(event_data.get("operator_id") or 0),
                 "time": event_time,
                 "adapter_source": "milky",
             }
@@ -345,16 +410,46 @@ class MilkyAdapter:
                 "sub_type": "leave",
                 "group_id": int(event_data.get("group_id", 0)),
                 "user_id": int(event_data.get("user_id", 0)),
-                "operator_id": int(event_data.get("operator_id", 0)),
+                "operator_id": int(event_data.get("operator_id") or 0),
                 "time": event_time,
                 "adapter_source": "milky",
             }
+
+        if event_type in ("group_admin_change", "group_member_mute", "group_whole_mute"):
+            is_admin = event_type == "group_admin_change"
+            duration = int(event_data.get("duration", 0))
+            muted = event_data.get("is_mute", duration > 0)
+            ob_event_dict = {"post_type": "notice", "notice_type": "group_admin" if is_admin else "group_ban",
+                             "sub_type": ("set" if event_data.get("is_set") else "unset") if is_admin else ("ban" if muted else "lift_ban"),
+                             "group_id": int(event_data.get("group_id", 0)), "user_id": int(event_data.get("user_id", 0)),
+                             "operator_id": int(event_data.get("operator_id") or 0), "duration": duration,
+                             "time": event_time, "adapter_source": "milky"}
+        elif event_type in ("friend_request", "group_join_request", "group_invited_join_request", "group_invitation"):
+            flag = uuid.uuid4().hex
+            self._request_context[flag] = (event_type, dict(event_data))
+            if len(self._request_context) > 1024:
+                self._request_context.pop(next(iter(self._request_context)))
+            ob_event_dict = {"post_type": "request", "request_type": "friend" if event_type == "friend_request" else "group",
+                             "user_id": int(event_data.get("initiator_id", 0)), "flag": flag,
+                             "comment": event_data.get("comment", ""), "time": event_time, "adapter_source": "milky"}
+            if event_type != "friend_request":
+                ob_event_dict.update(group_id=int(event_data.get("group_id", 0)),
+                                     sub_type="invite" if event_type == "group_invitation" else "add")
 
         if not ob_event_dict:
             self.logger.debug(f"Milky 未处理事件类型: {event_type}")
             return
         if 'self_id' not in ob_event_dict:
-            ob_event_dict['self_id'] = self.self_id
+            ob_event_dict['self_id'] = int(data.get("self_id", self.id))
+
+        if event_type == "message_receive":
+            self._remember_message(ob_event_dict["message_id"],
+                                   "group" if ob_event_dict["message_type"] == "group" else "friend",
+                                   ob_event_dict.get("group_id", event_data.get("peer_id", ob_event_dict["user_id"])))
+            for segment in milky_segments:
+                if segment.get("type") == "reply":
+                    self._remember_message(segment["data"]["message_seq"], scene,
+                                           event_data.get("peer_id", ob_event_dict.get("group_id", user_id)))
 
 
         event_obj = EventFactory.create_event(ob_event_dict)
@@ -391,12 +486,8 @@ class MilkyAdapter:
         try:
             async for raw in self.websocket:
                 await self._message_queue.put(raw)
-        except websockets.exceptions.ConnectionClosedError as e:
+        except websockets.exceptions.ConnectionClosed as e:
             self.logger.warning(f"Milky Event WebSocket 连接关闭: {e}")
-            if self._running:
-                self.logger.warning("5秒后重试连接 Milky Event WS...")
-                await asyncio.sleep(5)
-                await self._connect_and_run()
         except Exception as e:
             self.logger.error(f"Milky Event WS 接收异常: {e}", exc_info=True)
 
@@ -404,9 +495,11 @@ class MilkyAdapter:
         while self._running:
             try:
                 raw = await self._message_queue.get()
-                data = json.loads(raw)
-                await self._dispatch_milky_event(data)
-                self._message_queue.task_done()
+                try:
+                    data = json.loads(raw)
+                    await self._dispatch_milky_event(data)
+                finally:
+                    self._message_queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -420,6 +513,8 @@ class MilkyAdapter:
             import inspect
             sig = inspect.signature(websockets.connect)
             conn_kwargs = {"max_size": None}
+            if "proxy" in sig.parameters:
+                conn_kwargs["proxy"] = None
             if "additional_headers" in sig.parameters:
                 if headers:
                     conn_kwargs["additional_headers"] = headers
@@ -432,14 +527,17 @@ class MilkyAdapter:
             )
             self.logger.info_msg("Milky Event WebSocket 连接已建立")
         except Exception as e:
+            self.websocket = None
             self.logger.error(f"Milky Event WebSocket 连接错误: {e}")
-            if self._running:
-                self.logger.warning("5秒后重试连接...")
-                await asyncio.sleep(5)
-                await self._connect_and_run()
 
     async def _connect_and_run(self):
         self._running = True
+        while self._running:
+            await self._run_connection()
+            if self._running:
+                await asyncio.sleep(5)
+
+    async def _run_connection(self):
 
         try:
             info = await self._call_api("get_login_info")
@@ -468,6 +566,10 @@ class MilkyAdapter:
             finally:
                 if self._processing_task and not self._processing_task.done():
                     self._processing_task.cancel()
+                    await asyncio.gather(self._processing_task, return_exceptions=True)
+                if self.websocket:
+                    await self.websocket.close()
+                self.websocket = None
 
     async def send(self, event: EventBase, components: Union[str, list], Quote: bool = False):
         if isinstance(components, str):
@@ -476,7 +578,7 @@ class MilkyAdapter:
             components = [components]
 
         if Quote and hasattr(event, "message_id"):
-            components.insert(0, Reply(id=event.message_id))
+            components = [Reply(id=str(event.message_id)), *components]
 
         if hasattr(event, "group_id") and event.group_id:
             return await self.send_group_message(event.group_id, components)
@@ -501,7 +603,9 @@ class MilkyAdapter:
         }
         res = await self._call_api("send_group_message", params)
         if res.get("status") == "ok" and "data" in res:
-            res["data"] = {"message_id": res["data"].get("message_seq", 0)}
+            sequence = res["data"].get("message_seq", 0)
+            self._remember_message(sequence, "group", group_id)
+            res["data"] = {**res["data"], "message_id": sequence}
         return res
 
     async def send_friend_message(self, user_id: int, components: Union[str, list]):
@@ -520,7 +624,9 @@ class MilkyAdapter:
         }
         res = await self._call_api("send_private_message", params)
         if res.get("status") == "ok" and "data" in res:
-            res["data"] = {"message_id": res["data"].get("message_seq", 0)}
+            sequence = res["data"].get("message_seq", 0)
+            self._remember_message(sequence, "friend", user_id)
+            res["data"] = {**res["data"], "message_id": sequence}
         return res
 
     async def send_to_server(self, event: EventBase, message: Union[MessageChain, dict]):
@@ -545,10 +651,22 @@ class MilkyAdapter:
             params["user_id"] = int(user_id)
             return await self._call_api("recall_private_message", params)
         else:
-            return await self._call_api("recall_group_message", params)
+            contexts = self._message_context.get(int(message_id), set())
+            if len(contexts) != 1:
+                return {"status": "failed", "retcode": -1, "data": None,
+                        "msg": "撤回需要明确 group_id/user_id；消息上下文缺失或序列号冲突"}
+            scene, peer = next(iter(contexts))
+            return await self.recall(message_id, group_id=peer if scene == "group" else None,
+                                     user_id=peer if scene == "friend" else None)
 
     async def get_login_info(self):
-        return await self._call_api("get_login_info")
+        result = await self._call_api("get_login_info")
+        if result.get("status") == "ok" and isinstance(result.get("data"), dict):
+            result["data"]["user_id"] = result["data"].get("uin", self.id)
+        return result
+
+    def run(self):
+        asyncio.run(self._connect_and_run())
 
     async def get_status(self):
         info = await self.get_login_info()
@@ -578,7 +696,7 @@ class MilkyAdapter:
         return res
 
     async def get_group_info(self, group_id: int, no_cache: bool = False):
-        res = await self._call_api("get_group_info", {"group_id": int(group_id)})
+        res = await self._call_api("get_group_info", {"group_id": int(group_id), "no_cache": no_cache})
         if res.get("status") == "ok" and "data" in res and "group" in res["data"]:
             return {"status": "ok", "retcode": 0, "data": res["data"]["group"]}
         return res
@@ -590,7 +708,7 @@ class MilkyAdapter:
         return res
 
     async def get_group_member_info(self, group_id: int, user_id: int, no_cache: bool = False):
-        res = await self._call_api("get_group_member_info", {"group_id": int(group_id), "user_id": int(user_id)})
+        res = await self._call_api("get_group_member_info", {"group_id": int(group_id), "user_id": int(user_id), "no_cache": no_cache})
         if res.get("status") == "ok" and "data" in res and "member" in res["data"]:
             return {"status": "ok", "retcode": 0, "data": res["data"]["member"]}
         return res
@@ -603,9 +721,9 @@ class MilkyAdapter:
         })
 
     async def set_group_whole_ban(self, group_id: int, enable: bool = True):
-        return await self._call_api("set_group_mute", {
+        return await self._call_api("set_group_whole_mute", {
             "group_id": int(group_id),
-            "mute": enable
+            "is_mute": enable
         })
 
     async def set_group_card(self, group_id: int, user_id: int, card: str = ""):
@@ -618,7 +736,7 @@ class MilkyAdapter:
     async def set_group_name(self, group_id: int, group_name: str):
         return await self._call_api("set_group_name", {
             "group_id": int(group_id),
-            "name": group_name
+            "new_group_name": group_name
         })
 
     async def set_group_kick(self, group_id: int, user_id: int, reject_add_request: bool = False):
@@ -629,7 +747,7 @@ class MilkyAdapter:
         })
 
     async def quit(self, group_id: int):
-        return await self._call_api("leave_group", {"group_id": int(group_id)})
+        return await self._call_api("quit_group", {"group_id": int(group_id)})
 
     async def group_poke(self, group_id: int, user_id: int):
         return await self._call_api("send_group_nudge", {
@@ -641,18 +759,259 @@ class MilkyAdapter:
         return await self._call_api("send_friend_nudge", {"user_id": int(user_id)})
 
     async def send_group_forward_msg(self, group_id: int, components: Union[str, list]):
-        self.logger.warning("Milky 暂不直接支持合并转发，降级处理")
-        return await self.send_group_message(group_id, components)
+        segments = self.onebot_to_milky_segments(components if isinstance(components, list) else [components])
+        return await self._send_forward("group", group_id, segments)
 
     async def send_private_forward_msg(self, user_id: int, components: Union[str, list]):
-        self.logger.warning("Milky 暂不直接支持私聊合并转发，降级处理")
-        return await self.send_friend_message(user_id, components)
+        segments = self.onebot_to_milky_segments(components if isinstance(components, list) else [components])
+        return await self._send_forward("friend", user_id, segments)
 
-    async def get_msg(self, message_id: int):
+    async def _send_forward(self, scene, peer_id, segments):
+        result = await self._call_api("send_group_message" if scene == "group" else "send_private_message",
+                                      {"group_id" if scene == "group" else "user_id": int(peer_id), "message": segments})
+        if result.get("status") == "ok" and isinstance(result.get("data"), dict):
+            sequence = result["data"].get("message_seq", 0)
+            self._remember_message(sequence, scene, peer_id)
+            result["data"]["message_id"] = sequence
+        return result
+
+    async def get_msg(self, message_id: int, group_id=None, user_id=None):
+        contexts = self._message_context.get(int(message_id), set())
+        if group_id is not None:
+            scene, peer = "group", int(group_id)
+        elif user_id is not None:
+            scene, peer = "friend", int(user_id)
+        elif len(contexts) == 1:
+            scene, peer = next(iter(contexts))
+        else:
+            return {"status": "failed", "retcode": -1, "data": None, "msg": "消息上下文缺失或存在序列号冲突"}
+        result = await self._call_api("get_message", {"message_scene": scene, "peer_id": peer, "message_seq": int(message_id)})
+        if result.get("status") == "ok":
+            message = (result.get("data") or {}).get("message", {})
+            sender = message.get("group_member") or message.get("friend") or {}
+            user_id = int(message.get("sender_id", sender.get("user_id", 0)))
+            segments = self.milky_to_onebot_segments(await self._resolve_media_segments(message.get("segments", [])))
+            event = {"post_type": "message", "message_type": "group" if scene == "group" else "private",
+                     "sub_type": "normal" if scene == "group" else "friend", "self_id": self.id,
+                     "time": message.get("time", int(time.time())), "message_id": int(message_id),
+                     "user_id": user_id, "sender": {**sender, "user_id": user_id},
+                     "message": segments, "raw_message": "", "font": 0, "adapter_source": "milky"}
+            if scene == "group":
+                event["group_id"] = peer
+            return EventFactory.create_event(event)
         return None
+
+    async def get_forward_msg(self, message_id: str):
+        result = await self._call_api("get_forwarded_messages", {"forward_id": str(message_id)})
+        if result.get("status") == "ok":
+            messages = []
+            for message in (result.get("data") or {}).get("messages", []):
+                messages.append({**message, "sender": {"nickname": message.get("sender_name", ""),
+                                                       "user_id": message.get("user_id", 0)},
+                                 "content": self.milky_to_onebot_segments(await self._resolve_media_segments(message.get("segments", [])))})
+            result["data"] = {"messages": messages}
+        return result
+
+    async def send_like(self, user_id):
+        return await self._call_api("send_profile_like", {"user_id": int(user_id), "count": 10})
+
+    async def delete_friend(self, user_id):
+        return await self._call_api("delete_friend", {"user_id": int(user_id)})
+
+    async def get_stranger_info(self, user_id):
+        result = await self._call_api("get_user_profile", {"user_id": int(user_id)})
+        if result.get("status") == "ok":
+            result["data"]["user_id"] = int(user_id)
+        return result
+
+    async def set_qq_avatar(self, file):
+        return await self._call_api("set_avatar", {"uri": self._media_uri(file)})
+
+    async def set_group_admin(self, group_id, user_id, enable):
+        return await self._call_api("set_group_member_admin", {"group_id": int(group_id), "user_id": int(user_id), "is_set": bool(enable)})
+
+    async def set_group_special_title(self, group_id, user_id, special_title):
+        return await self._call_api("set_group_member_special_title", {"group_id": int(group_id), "user_id": int(user_id), "special_title": special_title})
+
+    async def upload_private_file(self, user_id, file, name=None):
+        return await self._call_api("upload_private_file", {"user_id": int(user_id), "file_uri": self._media_uri(file), "file_name": name or os.path.basename(file)})
+
+    async def upload_group_file(self, group_id, file, name=None):
+        return await self._call_api("upload_group_file", {"group_id": int(group_id), "file_uri": self._media_uri(file), "file_name": name or os.path.basename(file)})
+
+    async def get_group_root_files(self, group_id):
+        return await self._call_api("get_group_files", {"group_id": int(group_id)})
+
+    async def delete_group_file(self, group_id, file_id):
+        return await self._call_api("delete_group_file", {"group_id": int(group_id), "file_id": file_id})
+
+    async def create_group_file_folder(self, group_id, name):
+        return await self._call_api("create_group_folder", {"group_id": int(group_id), "folder_name": name})
+
+    async def delete_group_folder(self, group_id, folder_id):
+        return await self._call_api("delete_group_folder", {"group_id": int(group_id), "folder_id": folder_id})
+
+    async def _send_group_notice(self, group_id, content, image=None):
+        params = {"group_id": int(group_id), "content": content}
+        if image:
+            params["image_uri"] = self._media_uri(image)
+        return await self._call_api("send_group_announcement", params)
+
+    async def _get_group_notice(self, group_id):
+        return await self._call_api("get_group_announcements", {"group_id": int(group_id)})
+
+    async def handle_friend_request(self, flag, approve, remark=""):
+        context = self._request_context.get(str(flag))
+        if not context or context[0] != "friend_request":
+            return self._unsupported("好友请求 flag 未找到；需要适配器接收到的真实请求")
+        payload = {"initiator_uid": context[1]["initiator_uid"], "is_filtered": context[1].get("is_filtered", False)}
+        if not approve:
+            payload["reason"] = remark
+        return await self._call_api("accept_friend_request" if approve else "reject_friend_request", payload)
+
+    async def set_group_add_request(self, flag, approve, reason=""):
+        context = self._request_context.get(str(flag))
+        if not context or context[0] == "friend_request":
+            return self._unsupported("群请求 flag 未找到；需要适配器接收到的真实请求")
+        kind, data = context
+        if kind == "group_invitation":
+            return await self._call_api("accept_group_invitation" if approve else "reject_group_invitation",
+                                        {"group_id": data["group_id"], "invitation_seq": data["invitation_seq"]})
+        payload = {"group_id": data["group_id"], "notification_seq": data["notification_seq"],
+                   "notification_type": "join_request" if kind == "group_join_request" else "invited_join_request",
+                   "is_filtered": data.get("is_filtered", False)}
+        if not approve:
+            payload["reason"] = reason
+        return await self._call_api("accept_group_request" if approve else "reject_group_request", payload)
+
+    @staticmethod
+    def _unsupported(message):
+        return {"status": "failed", "retcode": -1, "data": None, "msg": message}
+
+    async def get_essence_msg_list(self, group_id):
+        return await self._call_api("get_group_essence_messages", {"group_id": int(group_id), "page_index": 0, "page_size": 20})
+
+    async def set_essence_msg(self, message_id):
+        return await self._set_essence(message_id, True)
+
+    async def delete_essence_msg(self, message_id):
+        return await self._set_essence(message_id, False)
+
+    async def _set_essence(self, message_id, setting):
+        contexts = self._message_context.get(int(message_id), set())
+        if len(contexts) != 1 or next(iter(contexts))[0] != "group":
+            return self._unsupported("精华消息需要唯一群消息上下文")
+        return await self._call_api("set_group_essence_message", {"group_id": next(iter(contexts))[1],
+                                    "message_seq": int(message_id), "is_set": setting})
+
+    async def get_group_file_url(self, file_id, group_id=None):
+        if group_id is None:
+            return self._unsupported("Milky 下载群文件需要额外提供 group_id")
+        return await self._call_api("get_group_file_download_url", {"group_id": int(group_id), "file_id": file_id})
+
+    async def get_group_ignore_add_request(self, group_id):
+        result = await self._call_api("get_group_notifications", {"is_filtered": True})
+        if result.get("status") == "ok":
+            result["data"]["notifications"] = [item for item in result["data"].get("notifications", []) if item.get("group_id") == int(group_id)]
+        return result
+
+    async def set_friend_remark(self, user_id, remark):
+        return self._unsupported("Milky 1.3 没有设置好友备注接口")
+
+    async def set_friend_category(self, user_id, category_id):
+        return self._unsupported("Milky 1.3 没有设置好友分组接口")
+
+    async def get_group_honor_info(self, group_id):
+        return self._unsupported("Milky 1.3 没有群荣誉接口")
+
+    async def send_group_sign(self, group_id):
+        return self._unsupported("Milky 1.3 没有群签到接口")
+
+    async def get_record(self, file, out_format="mp3"):
+        return self._unsupported("Milky 1.3 没有 OneBot 语音转码接口")
+
+    async def get_video(self, url, path):
+        return self._unsupported("Milky 1.3 没有 OneBot 视频下载扩展接口")
+
+    async def get_ai_characters(self):
+        return self._unsupported("Milky 1.3 没有 AI 语音角色接口")
+
+    async def get_ai_record(self, group_id, character, text):
+        return self._unsupported("Milky 1.3 没有 AI 语音合成接口")
+
+    # Native Milky methods supplement the existing OneBot-compatible facade.
+    # Availability is decided by the running server, never by prior test status.
+    async def get_impl_info(self):
+        return await self._call_api("get_impl_info")
+
+    async def get_friend_info(self, user_id, no_cache=False):
+        return await self._call_api("get_friend_info", {"user_id": int(user_id), "no_cache": no_cache})
+
+    async def get_peer_pins(self):
+        return await self._call_api("get_peer_pins")
+
+    async def set_peer_pin(self, message_scene, peer_id, is_pinned=True):
+        return await self._call_api("set_peer_pin", {"message_scene": message_scene, "peer_id": int(peer_id), "is_pinned": is_pinned})
+
+    async def set_nickname(self, new_nickname):
+        return await self._call_api("set_nickname", {"new_nickname": new_nickname})
+
+    async def set_bio(self, new_bio):
+        return await self._call_api("set_bio", {"new_bio": new_bio})
+
+    async def get_custom_face_url_list(self):
+        return await self._call_api("get_custom_face_url_list")
+
+    async def get_cookies(self, domain):
+        return await self._call_api("get_cookies", {"domain": domain})
+
+    async def get_csrf_token(self):
+        return await self._call_api("get_csrf_token")
+
+    async def get_history_messages(self, message_scene, peer_id, limit=20, start_message_seq=None):
+        params = {"message_scene": message_scene, "peer_id": int(peer_id), "limit": int(limit)}
+        if start_message_seq is not None:
+            params["start_message_seq"] = int(start_message_seq)
+        return await self._call_api("get_history_messages", params)
+
+    async def mark_message_as_read(self, message_scene, peer_id, message_seq):
+        return await self._call_api("mark_message_as_read", {"message_scene": message_scene, "peer_id": int(peer_id), "message_seq": int(message_seq)})
+
+    async def get_friend_requests(self, limit=20, is_filtered=False):
+        return await self._call_api("get_friend_requests", {"limit": int(limit), "is_filtered": is_filtered})
+
+    async def set_group_avatar(self, group_id, image_uri):
+        return await self._call_api("set_group_avatar", {"group_id": int(group_id), "image_uri": self._media_uri(image_uri)})
+
+    async def delete_group_announcement(self, group_id, announcement_id):
+        return await self._call_api("delete_group_announcement", {"group_id": int(group_id), "announcement_id": announcement_id})
+
+    async def send_group_message_reaction(self, group_id, message_seq, reaction, is_add=True, reaction_type="face"):
+        return await self._call_api("send_group_message_reaction", {"group_id": int(group_id), "message_seq": int(message_seq), "reaction": str(reaction), "is_add": is_add, "reaction_type": reaction_type})
+
+    async def get_private_file_download_url(self, user_id, file_id, file_hash, is_self_send=False):
+        return await self._call_api("get_private_file_download_url", {"user_id": int(user_id), "file_id": file_id, "file_hash": file_hash, "is_self_send": is_self_send})
+
+    async def move_group_file(self, group_id, file_id, parent_folder_id="/", target_folder_id="/"):
+        return await self._call_api("move_group_file", {"group_id": int(group_id), "file_id": file_id, "parent_folder_id": parent_folder_id, "target_folder_id": target_folder_id})
+
+    async def rename_group_file(self, group_id, file_id, new_file_name, parent_folder_id="/"):
+        return await self._call_api("rename_group_file", {"group_id": int(group_id), "file_id": file_id, "new_file_name": new_file_name, "parent_folder_id": parent_folder_id})
+
+    async def persist_group_file(self, group_id, file_id):
+        return await self._call_api("persist_group_file", {"group_id": int(group_id), "file_id": file_id})
+
+    async def rename_group_folder(self, group_id, folder_id, new_folder_name):
+        return await self._call_api("rename_group_folder", {"group_id": int(group_id), "folder_id": folder_id, "new_folder_name": new_folder_name})
 
     async def close(self):
         self._running = False
+        tasks = [task for task in (self.receive_task, self._processing_task)
+                 if task and task is not asyncio.current_task() and not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if self.websocket:
             try:
                 await self.websocket.close()

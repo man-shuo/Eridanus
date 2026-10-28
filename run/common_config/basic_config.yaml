@@ -51,6 +51,7 @@ protocol:
     client:            # Eridanus 主动连接 Milky 服务端
       enable: true
       api_url: "http://127.0.0.1:3001"        # Milky HTTP API 根地址
+      api_timeout: 60                         # 单次请求超时秒数；发送超时不自动重发，避免重复消息
       event_ws_url: "ws://127.0.0.1:3001/event" # Milky 事件流 WebSocket 地址
     webhook_server:    # Eridanus 作为 Webhook 服务端接收事件上报，默认关闭
       enable: false
