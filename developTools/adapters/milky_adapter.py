@@ -325,6 +325,31 @@ class MilkyAdapter:
             (self.id, scene, int(peer), int(seq))).fetchone()
         return json.loads(row[0]) if row else None
 
+    def _find_quoted_original(self, scene, peer, quoted):
+        # Yogurt private replies can expose seq=0 and flatten images to their summary.
+        # Match only exact sender, timestamp and preview, and reject ambiguity.
+        if not quoted.get("segments") or any(s.get("type") != "text" for s in quoted["segments"]):
+            return None
+        preview = "".join(s.get("data", {}).get("text", "") for s in quoted["segments"])
+        matches = []
+        rows = self._message_db.execute(
+            "SELECT body FROM messages WHERE account=? AND scene=? AND peer=? ORDER BY saved DESC LIMIT 500",
+            (self.id, scene, int(peer)))
+        for (body,) in rows:
+            message = json.loads(body)
+            if (int(message.get("message_seq", 0)) <= 0 or
+                    message.get("sender_id") != quoted.get("sender_id") or
+                    message.get("time") != quoted.get("time")):
+                continue
+            segments = message.get("segments", [])
+            if not segments or any(s.get("type") not in ("text", "image") for s in segments):
+                continue
+            summary = "".join(s.get("data", {}).get("text", "") if s.get("type") == "text"
+                              else s.get("data", {}).get("summary") or "[图片]" for s in segments)
+            if summary == preview:
+                matches.append(message)
+        return matches[0] if len(matches) == 1 else None
+
     def _cache_sent(self, scene, peer, result, segments):
         self._cache_message({"message_scene": scene, "peer_id": int(peer),
             "message_seq": result["message_seq"], "sender_id": self.id,
@@ -350,6 +375,7 @@ class MilkyAdapter:
                     quoted = segment.get("data", {})
                     if quoted.get("segments"):
                         native_seq = int(quoted["message_seq"])
+                        original = self._find_quoted_original(scene, peer, quoted) if native_seq == 0 else None
                         if native_seq == 0:
                             identity = json.dumps([self.id, scene, peer, quoted], sort_keys=True, ensure_ascii=False)
                             quoted["message_seq"] = -int(hashlib.sha256(identity.encode()).hexdigest()[:15], 16) - 1
@@ -358,8 +384,9 @@ class MilkyAdapter:
                         if self._cached_message(scene, peer, quoted["message_seq"]) is None:
                             self._cache_message({"message_scene": scene, "peer_id": peer,
                                 "message_seq": quoted["message_seq"], "sender_id": quoted.get("sender_id", 0),
-                                "native_message_seq": native_seq,
-                                "time": quoted.get("time", event_time), "segments": quoted["segments"],
+                                "native_message_seq": original["message_seq"] if original else native_seq,
+                                "time": quoted.get("time", event_time),
+                                "segments": original["segments"] if original else quoted["segments"],
                                 "sender": {"user_id": quoted.get("sender_id", 0), "nickname": quoted.get("sender_name") or ""}})
             sender_info = event_data.get("group_member") or event_data.get("friend") or event_data.get("sender", {})
             milky_segments = await self._resolve_media_segments(event_data.get("segments", []))
@@ -880,7 +907,9 @@ class MilkyAdapter:
             if not message:
                 return None
             self._cache_message({**message, "message_scene": scene, "peer_id": peer, "message_seq": int(message_id)})
-            sender = message.get("group_member") or message.get("friend") or message.get("sender") or {}
+            sender = dict(message.get("group_member") or message.get("friend") or message.get("sender") or {})
+            if sender.get("level") is not None:
+                sender["level"] = str(sender["level"])
             user_id = int(message.get("sender_id", sender.get("user_id", 0)))
             segments = self.milky_to_onebot_segments(await self._resolve_media_segments(message.get("segments", []), refresh=True))
             event = {"post_type": "message", "message_type": "group" if scene == "group" else "private",
