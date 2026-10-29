@@ -318,7 +318,7 @@ class ReplyEngine:
                 if group_mem_mode in ("slots", "both"):
                     group_slots = self.context.get_group_memory_slots(group_id)
 
-                recent_speaker_memories = self.context.get_recent_speaker_memories(group_id)
+                recent_speaker_memories = self.context.get_recent_speaker_memories(group_id, exclude_user_id=user_id)
 
             group_name = await self._get_group_name(bot, group_id) if is_group else "私聊"
             system_prompt = self.prompt_builder.build_system_prompt(

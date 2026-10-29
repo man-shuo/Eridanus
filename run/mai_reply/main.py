@@ -114,7 +114,7 @@ async def extract_message_content(event, bot) -> tuple:
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
                         })
-                        text_parts.append(f"[引用消息中包含图片，url：{img_url}]")
+                        #text_parts.append(f"[引用消息中包含图片，url：{img_url}]")
                     except Exception:
                         text_parts.append("[引用图片获取失败]")
 

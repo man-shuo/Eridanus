@@ -448,7 +448,9 @@ class ContextManager:
         speakers = speakers[-20:]
         self._ctx_set(key, json.dumps(speakers, ensure_ascii=False))
 
-    def get_recent_speakers(self, group_id: int, limit: Optional[int] = None) -> List[Dict]:
+    def get_recent_speakers(
+        self, group_id: int, limit: Optional[int] = None, exclude_user_id: Optional[int] = None
+    ) -> List[Dict]:
         """
         获取群内最近发言的成员列表（从新到旧）。
         每项结构：{"user_id": int, "name": str, "ts": int}
@@ -459,8 +461,10 @@ class ContextManager:
             speakers: List[Dict] = json.loads(raw) if raw else []
         except Exception:
             speakers = []
-        # 最新的在末尾，反转后取 limit 个
+        # 最新的在末尾，反转后先过滤掉 exclude_user_id，再截取 limit 个
         speakers = list(reversed(speakers))
+        if exclude_user_id is not None:
+            speakers = [s for s in speakers if s.get("user_id") != exclude_user_id]
         if limit is not None:
             speakers = speakers[:limit]
         return speakers
@@ -648,7 +652,9 @@ class ContextManager:
             return self.memory_slots.clear_all_group_slots(group_id)
         return 0
 
-    def get_recent_speaker_memories(self, group_id: int) -> List[Dict]:
+    def get_recent_speaker_memories(
+        self, group_id: int, exclude_user_id: Optional[int] = None
+    ) -> List[Dict]:
         """
         批量读取群内最近 group_reply_impression_count 位发言者的记忆。
         支持根据用户记忆模式动态返回：
@@ -657,7 +663,9 @@ class ContextManager:
         - both 模式: 同时返回印象与槽位事实
         返回: [{"name": str, "user_id": int, "impression": str, "slots": str}, ...]
         """
-        speakers = self.get_recent_speakers(group_id, limit=self.group_reply_speaker_memory_count)
+        speakers = self.get_recent_speakers(
+            group_id, limit=self.group_reply_speaker_memory_count, exclude_user_id=exclude_user_id
+        )
         mode = self.get_effective_user_memory_mode()
         result = []
         for s in speakers:
@@ -698,13 +706,17 @@ class ContextManager:
         group_history = self.get_session_history(group_id, user_id)
         return group_history[-max_msgs:]
 
-    def get_recent_speaker_impressions(self, group_id: int) -> List[Dict]:
+    def get_recent_speaker_impressions(
+        self, group_id: int, exclude_user_id: Optional[int] = None
+    ) -> List[Dict]:
         """
         批量读取群内最近 group_reply_impression_count 位发言者的用户印象。
         返回：[{"name": str, "user_id": int, "impression": str}, ...]
         只返回实际有印象记录的成员（跳过空印象）。
         """
-        speakers = self.get_recent_speakers(group_id, limit=self.group_reply_speaker_memory_count)
+        speakers = self.get_recent_speakers(
+            group_id, limit=self.group_reply_speaker_memory_count, exclude_user_id=exclude_user_id
+        )
         result = []
         for s in speakers:
             uid = s.get("user_id")
