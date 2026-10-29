@@ -1,0 +1,47 @@
+# RAG 为独立的第三层记忆，既可单用，也可与 impression/slots 共存。
+# 修改后重启插件/Bot。默认关闭，不影响原有记忆模式及白名单。
+enable: false
+integration_mode: replace  # replace: 回复只注入RAG；augment: 与旧记忆叠加（不保证省token）
+db_path: data/dataBase/mai_rag_memory.db
+private:
+  enable: true
+group:
+  enable: true
+  whitelist_enabled: true
+  whitelist: []
+  observe_untriggered: true  # 旁观消息也沉淀；仅作用于上面允许的群
+embedding:
+  provider: cloudflare  # cloudflare: Workers AI；openai: 8099/Kaggle 等兼容接口
+  # 以下同层参数仅用于 openai provider。
+  base_url: http://localhost:8099/v1
+  endpoint: embeddings
+  model: qwen3-embedding-4b
+  api_key: endlesswork
+  api_key_env: MAI_RAG_API_KEY  # 设置时优先于 api_key
+  timeout_seconds: 12
+  dimensions: null  # 模型默认维度；切换模型/维度时自动重新索引
+  query_instruction: Given a conversation query, retrieve relevant past conversations and memories
+  # Cloudflare 不继承上面的模型、密钥、维度和 Qwen 指令。
+  cloudflare:
+    account_id: ""
+    model: '@cf/baai/bge-m3'
+    api_token: ''  # 填写 Token 或设置下面的环境变量
+    api_token_env: CLOUDFLARE_API_TOKEN
+    timeout_seconds: 30
+    query_instruction: ''  # BGE-M3 使用原文，无需 Instruct/Query 前缀
+index:
+  min_text_chars: 10
+  chunk_chars: 360
+  max_message_chars: 16000
+  batch_size: 16
+  retry_seconds: 60
+  max_pending: 10000
+retention:
+  days: 365
+  max_per_scope: 4000
+retrieval:
+  top_k: 3
+  min_similarity: 0.50
+  max_prompt_tokens: 640  # 记忆区严格上限，按UTF-8字节保守计数，含提示词包装
+  max_prompt_chars: 700
+  timeout_seconds: 2.5

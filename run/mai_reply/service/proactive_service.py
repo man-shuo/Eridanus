@@ -378,16 +378,22 @@ class ProactiveService:
     ) -> List[str]:
         """根据决策和外部资料，结合Bot人设生成高度口语化、亲密自然的主动关怀消息"""
         bot_name = self.prompt_builder.get_bot_name("yucca")
+        rag = getattr(self.engine, "rag_memory", None)
+        rag_replace = rag and rag.allowed() and rag.replaces_legacy
         user_memory = self.context.get_user_memory(user_id) if (user_id and hasattr(self.context, "get_user_memory")) else ""
         global_memory = self.context.get_global_memory() if hasattr(self.context, "get_global_memory") else ""
+        rag_memory = ""
+        if rag and user_id and rag.allowed():
+            rag_memory = await rag.recall(None, user_id, f"{decision.get('topic', '')} {decision.get('care_points', '')}")
         system_prompt = self.prompt_builder.build_system_prompt(
             bot_name=bot_name,
             user_name=user_name,
             group_name="私聊",
-            user_impression=user_impression,
+            user_impression=user_impression if not rag_replace else "",
             is_group=False,
-            global_memory=global_memory,
-            user_memory=user_memory,
+            global_memory=global_memory if not rag_replace else "",
+            user_memory=user_memory if not rag_replace else "",
+            rag_memory=rag_memory,
         )
 
         now = datetime.now()

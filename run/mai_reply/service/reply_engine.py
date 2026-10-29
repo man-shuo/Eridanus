@@ -33,6 +33,7 @@ from run.mai_reply.service.prompt_builder import PromptBuilder
 from run.mai_reply.service.reply_processor import ReplyProcessor
 from run.mai_reply.service.impression_updater import ImpressionUpdater
 from run.mai_reply.service.concurrency import ConcurrencyController
+from run.mai_reply.service.rag_memory import RAGMemory
 
 logger = get_logger(__name__)
 
@@ -108,6 +109,7 @@ class ReplyEngine:
         self.concurrency = ConcurrencyController(config)
         self.audit_system = AuditSystem(self.llm, self.context, config)
         self.mcp_manager = MCPManager(config)
+        self.rag_memory = RAGMemory(config)
 
         self._name_cache: dict[str, tuple[str, float]] = {}
 
@@ -274,6 +276,19 @@ class ReplyEngine:
                 # 传入 user_id 以便发言者追踪
                 self.context.push_group_window(group_id, user_name, final_text, user_id=user_id)
 
+            # 独立开关；先检索旧事件，当前消息随后进入持久化队列，避免自己命中自己。
+            rag_memory = ""
+            rag_replace = self.rag_memory.allowed(group_id) and self.rag_memory.replaces_legacy
+            if self.rag_memory.allowed(group_id):
+                recall_query = f"当前发言者 {user_name}(ID:{user_id}): {final_text}"
+                if is_group:
+                    recall_query = self.context.build_group_context_snippet(group_id, bot_name)[-1200:] + "\n" + recall_query
+                rag_memory = await self.rag_memory.recall(group_id, user_id, recall_query)
+                await self.rag_memory.remember(
+                    group_id, user_id, user_name, final_text,
+                    message_id=getattr(event, "message_id", None),
+                )
+
             # 提取历史对话上下文：群聊被@时精简提取少量私聊/群聊上下文（默认2-3轮），把宝贵窗口留给群公屏
             max_turns = self.cfg.mai_reply.config.get("context", {}).get("max_turns", 20)
             max_history_msgs = max_turns * 2
@@ -290,14 +305,14 @@ class ReplyEngine:
 
             # 内存模式感知：按配置动态读取用户记忆（slots / impression / both）
             user_mem_mode = self.context.get_effective_user_memory_mode() if hasattr(self.context, "get_effective_user_memory_mode") else "slots"
-            user_impression = self.context.get_impression(user_id) if user_mem_mode in ("impression", "both") else ""
-            user_memory = self.context.get_user_memory(user_id) if user_mem_mode in ("slots", "both") else ""
+            user_impression = self.context.get_impression(user_id) if not rag_replace and user_mem_mode in ("impression", "both") else ""
+            user_memory = self.context.get_user_memory(user_id) if not rag_replace and user_mem_mode in ("slots", "both") else ""
 
             # 群聊专属记忆：群聊生态特征槽位(group_slots)与群整体主观印象(group_impression)，及最近发言者记忆
             group_impression = ""
             group_slots = ""
             recent_speaker_memories = []
-            if is_group and group_id:
+            if is_group and group_id and not rag_replace:
                 group_mem_mode = self.context.get_effective_group_memory_mode() if hasattr(self.context, "get_effective_group_memory_mode") else "slots"
                 if group_mem_mode in ("impression", "both"):
                     group_impression = self.context.get_group_impression(group_id)
@@ -318,9 +333,10 @@ class ReplyEngine:
                 group_impression=group_impression,
                 recent_speaker_memories=recent_speaker_memories,
                 user_text=final_text,
-                global_memory=self.context.get_global_memory(),
+                global_memory=self.context.get_global_memory() if not rag_replace else "",
                 user_memory=user_memory,
                 group_slots=group_slots,
+                rag_memory=rag_memory,
             )
             if system_prompt_prefix:
                 system_prompt = f"{system_prompt_prefix.strip()}\n\n{system_prompt}"

@@ -268,6 +268,17 @@ def main(bot: ExtendBot, config: YAMLManager):
         group_id = getattr(event, "group_id", None) if is_group else None
         has_target_at = has_at_target(event)
 
+        # RAG 删除独立于旧记忆；群管理员只能清理当前群，用户可删除自己的私聊记忆。
+        if text == "/clearrag" or text == "清除RAG记忆":
+            if is_group:
+                role = getattr(event, "permission", None) or getattr(getattr(event, "sender", None), "role", None)
+                if not is_master(event.user_id) and role not in ("ADMINISTRATOR", "OWNER", "admin", "owner"):
+                    await bot.send(event, "只有管理员或主人可以清空本群的RAG记忆。")
+                    return True
+            count = await engine.rag_memory.clear(group_id=group_id, user_id=event.user_id)
+            await bot.send(event, f"已清除{'本群' if is_group else '你的私聊'}RAG记忆，共 {count} 条。")
+            return True
+
         if text in ("/clearall", "清除全部对话", "清理全部对话"):
             if not is_master(event.user_id):
                 return True
@@ -428,6 +439,11 @@ def main(bot: ExtendBot, config: YAMLManager):
                         message_context_text,
                         user_id=event.user_id,  # ← 传入 user_id
                     )
+                    if engine.rag_memory.cfg.get("group", {}).get("observe_untriggered", True):
+                        await engine.rag_memory.remember(
+                            event.group_id, event.user_id, user_name, message_context_text,
+                            message_id=getattr(event, "message_id", None),
+                        )
                     # 只有在群记忆启用且该群允许时，才进行群记忆 tick
                     if engine.impression_updater.is_group_memory_enabled(event.group_id):
                         group_name_hint = str(event.group_id)  # 此处无法拿到群名，用 group_id 代替

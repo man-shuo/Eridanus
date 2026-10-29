@@ -151,6 +151,7 @@ class PromptBuilder:
         user_memory: str = "",
         group_slots: str = "",
         recent_speaker_memories: Optional[List[Dict]] = None,
+        rag_memory: str = "",
     ) -> str:
         """
         构建最终的 system prompt。
@@ -185,6 +186,9 @@ class PromptBuilder:
 
         if group_context_snippet:
             prompt += f"\n\n{group_context_snippet}"
+
+        if rag_memory:
+            prompt += rag_memory
 
         # ---- 最近发言者的记忆与槽位特征（群聊专属，让群交互认知更全面） ----
         speakers = recent_speaker_memories or recent_speaker_impressions
