@@ -1,6 +1,5 @@
-# RAG 为独立的第三层记忆，既可单用，也可与 impression/slots 共存。
-# 修改后重启插件/Bot。默认关闭，不影响原有记忆模式及白名单。
-enable: false
+
+enable: false  # RAG 为独立的第三层记忆，既可单用，也可与 impression/slots 共存。
 integration_mode: replace  # replace: 回复只注入RAG；augment: 与旧记忆叠加（不保证省token）
 db_path: data/dataBase/mai_rag_memory.db
 private:
@@ -19,11 +18,11 @@ embedding:
   api_key: endlesswork
   api_key_env: MAI_RAG_API_KEY  # 设置时优先于 api_key
   timeout_seconds: 12
-  dimensions: null  # 模型默认维度；切换模型/维度时自动重新索引
+  dimensions: ''  # 模型默认维度；切换模型/维度时自动重新索引
   query_instruction: Given a conversation query, retrieve relevant past conversations and memories
   # Cloudflare 不继承上面的模型、密钥、维度和 Qwen 指令。
   cloudflare:
-    account_id: ""
+    account_id: ''
     model: '@cf/baai/bge-m3'
     api_token: ''  # 填写 Token 或设置下面的环境变量
     api_token_env: CLOUDFLARE_API_TOKEN
