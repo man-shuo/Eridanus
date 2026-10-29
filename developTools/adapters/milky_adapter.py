@@ -6,6 +6,9 @@ import os
 import sys
 import time
 import uuid
+import sqlite3
+import hashlib
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Type, Union, Dict, Optional, List, Any
 
@@ -31,6 +34,8 @@ from developTools.message.message_chain import MessageChain
 from developTools.message.message_components import MessageComponent, Text, Reply, Node, File, Image, Face, At
 from developTools.utils.logger import get_logger
 from framework_common.utils.utils import convert_list_to_type
+
+_handler_peer = ContextVar("milky_handler_peer", default=None)
 
 
 class EventBus:
@@ -66,7 +71,15 @@ class EventBus:
         event_type = type(event_instance)
         if handlers := self.handlers.get(event_type):
             for handler in handlers:
-                task = asyncio.create_task(handler(event_instance))
+                async def invoke(callback=handler):
+                    scene = "group" if getattr(event_instance, "group_id", None) else "friend"
+                    peer = getattr(event_instance, "group_id", None) or getattr(event_instance, "user_id", None)
+                    token = _handler_peer.set((scene, peer))
+                    try:
+                        await callback(event_instance)
+                    finally:
+                        _handler_peer.reset(token)
+                task = asyncio.create_task(invoke())
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 
@@ -81,6 +94,7 @@ class MilkyAdapter:
         enable_monitoring: bool = True,
         handler_timeout_warning: float = 10.0,
         api_timeout: float = 60.0,
+        message_cache_path: Optional[str] = None,
         **kwargs
     ):
         self.api_url = api_url.rstrip("/")
@@ -100,6 +114,13 @@ class MilkyAdapter:
         self._running = False
         self._message_context = {}
         self._request_context = {}
+        cache_path = Path(message_cache_path) if message_cache_path else Path("data/dataBase/milky_recent_messages.db")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self._message_db = sqlite3.connect(str(cache_path))
+        self._message_db.execute("PRAGMA journal_mode=WAL")
+        self._message_db.execute("CREATE TABLE IF NOT EXISTS messages (account INTEGER, scene TEXT, peer INTEGER, seq INTEGER, body TEXT, saved REAL, PRIMARY KEY(account,scene,peer,seq))")
+        self._message_db.execute("DELETE FROM messages WHERE saved < ?", (time.time() - 7 * 86400,))
+        self._message_db.commit()
 
         headers = {"Content-Type": "application/json"}
         if self.access_token:
@@ -291,6 +312,24 @@ class MilkyAdapter:
         if len(self._message_context) > 4096:
             self._message_context.pop(next(iter(self._message_context)))
 
+    def _cache_message(self, message):
+        scene, peer, seq = message["message_scene"], int(message["peer_id"]), int(message["message_seq"])
+        self._remember_message(seq, scene, peer)
+        self._message_db.execute("INSERT OR REPLACE INTO messages VALUES (?,?,?,?,?,?)",
+            (self.id, scene, peer, seq, json.dumps(message, ensure_ascii=False), time.time()))
+        self._message_db.execute("DELETE FROM messages WHERE rowid IN (SELECT rowid FROM messages ORDER BY saved DESC LIMIT -1 OFFSET 10000)")
+        self._message_db.commit()
+
+    def _cached_message(self, scene, peer, seq):
+        row = self._message_db.execute("SELECT body FROM messages WHERE account=? AND scene=? AND peer=? AND seq=?",
+            (self.id, scene, int(peer), int(seq))).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def _cache_sent(self, scene, peer, result, segments):
+        self._cache_message({"message_scene": scene, "peer_id": int(peer),
+            "message_seq": result["message_seq"], "sender_id": self.id,
+            "time": result.get("time", int(time.time())), "segments": segments})
+
     async def _dispatch_milky_event(self, data: dict):
         event_type = data.get("event_type", "")
         event_data = data.get("data", {})
@@ -299,15 +338,33 @@ class MilkyAdapter:
         ob_event_dict = None
 
         if event_type == "message_receive":
+            event_data = {**event_data, "segments": [
+                {**segment, "data": dict(segment.get("data", {}))}
+                for segment in event_data.get("segments", [])]}
+            self.id = int(data.get("self_id", self.id))
             scene = event_data.get("message_scene", "group" if "group_id" in event_data else "friend")
+            peer = int(event_data.get("peer_id", event_data.get("group_id", event_data.get("sender_id", 0))))
+            self._cache_message({**event_data, "message_scene": scene, "peer_id": peer})
+            for segment in event_data.get("segments", []):
+                if segment.get("type") == "reply":
+                    quoted = segment.get("data", {})
+                    if quoted.get("segments"):
+                        native_seq = int(quoted["message_seq"])
+                        if native_seq == 0:
+                            identity = json.dumps([self.id, scene, peer, quoted], sort_keys=True, ensure_ascii=False)
+                            quoted["message_seq"] = -int(hashlib.sha256(identity.encode()).hexdigest()[:15], 16) - 1
+                        self._cache_message({"message_scene": scene, "peer_id": peer,
+                            "message_seq": quoted["message_seq"], "sender_id": quoted.get("sender_id", 0),
+                            "native_message_seq": native_seq,
+                            "time": quoted.get("time", event_time), "segments": quoted["segments"],
+                            "sender": {"user_id": quoted.get("sender_id", 0), "nickname": quoted.get("sender_name") or ""}})
             sender_info = event_data.get("group_member") or event_data.get("friend") or event_data.get("sender", {})
             milky_segments = await self._resolve_media_segments(event_data.get("segments", []))
             ob_message = self.milky_to_onebot_segments(milky_segments)
 
-            raw_msg = "".join([
-                s.get("data", {}).get("text", "") if s.get("type") == "text"
-                else f"[CQ:{s.get('type')}]" for s in ob_message
-            ])
+            # Let the existing OneBot event parse the structured message. A CQ
+            # placeholder without id previously lost Reply.id in event.get().
+            raw_msg = ""
 
             user_id = int(event_data.get("sender_id", sender_info.get("user_id", 0)))
             message_seq = int(event_data.get("message_seq", 0))
@@ -597,6 +654,7 @@ class MilkyAdapter:
             return await self.send_group_forward_msg(group_id, components)
 
         milky_segs = self.onebot_to_milky_segments(components)
+        self._restore_native_reply_ids(milky_segs, "group", group_id)
         params = {
             "group_id": int(group_id),
             "message": milky_segs
@@ -605,6 +663,7 @@ class MilkyAdapter:
         if res.get("status") == "ok" and "data" in res:
             sequence = res["data"].get("message_seq", 0)
             self._remember_message(sequence, "group", group_id)
+            self._cache_sent("group", group_id, res["data"], milky_segs)
             res["data"] = {**res["data"], "message_id": sequence}
         return res
 
@@ -618,6 +677,7 @@ class MilkyAdapter:
             return await self.send_private_forward_msg(user_id, components)
 
         milky_segs = self.onebot_to_milky_segments(components)
+        self._restore_native_reply_ids(milky_segs, "friend", user_id)
         params = {
             "user_id": int(user_id),
             "message": milky_segs
@@ -626,6 +686,7 @@ class MilkyAdapter:
         if res.get("status") == "ok" and "data" in res:
             sequence = res["data"].get("message_seq", 0)
             self._remember_message(sequence, "friend", user_id)
+            self._cache_sent("friend", user_id, res["data"], milky_segs)
             res["data"] = {**res["data"], "message_id": sequence}
         return res
 
@@ -641,6 +702,16 @@ class MilkyAdapter:
             return await self.send_group_message(event.group_id, comps)
         elif hasattr(event, "user_id") and event.user_id:
             return await self.send_friend_message(event.user_id, comps)
+
+    def _restore_native_reply_ids(self, segments, scene, peer):
+        for segment in segments:
+            if segment.get("type") == "reply":
+                sequence = int(segment["data"]["message_seq"])
+                if sequence < 0:
+                    cached = self._cached_message(scene, peer, sequence)
+                    if cached is None or "native_message_seq" not in cached:
+                        raise ValueError("引用缓存不存在，不能把本地引用ID当作Milky序列号")
+                    segment["data"]["message_seq"] = cached["native_message_seq"]
 
     async def recall(self, message_id: int, group_id: Optional[int] = None, user_id: Optional[int] = None):
         params = {"message_seq": int(message_id)}
@@ -772,23 +843,41 @@ class MilkyAdapter:
         if result.get("status") == "ok" and isinstance(result.get("data"), dict):
             sequence = result["data"].get("message_seq", 0)
             self._remember_message(sequence, scene, peer_id)
+            self._cache_sent(scene, peer_id, result["data"], segments)
             result["data"]["message_id"] = sequence
         return result
 
     async def get_msg(self, message_id: int, group_id=None, user_id=None):
-        contexts = self._message_context.get(int(message_id), set())
+        contexts = set(self._message_context.get(int(message_id), set()))
+        contexts.update(self._message_db.execute("SELECT scene,peer FROM messages WHERE account=? AND seq=?",
+                        (self.id, int(message_id))).fetchall())
         if group_id is not None:
             scene, peer = "group", int(group_id)
         elif user_id is not None:
             scene, peer = "friend", int(user_id)
+        elif _handler_peer.get() is not None and _handler_peer.get()[1] is not None:
+            scene, peer = _handler_peer.get()
         elif len(contexts) == 1:
             scene, peer = next(iter(contexts))
         else:
-            return {"status": "failed", "retcode": -1, "data": None, "msg": "消息上下文缺失或存在序列号冲突"}
-        result = await self._call_api("get_message", {"message_scene": scene, "peer_id": peer, "message_seq": int(message_id)})
+            self.logger.warning("Milky get_msg 缺少会话上下文或序列号冲突，请提供 group_id/user_id")
+            return None
+        cached = self._cached_message(scene, peer, message_id)
+        result = {"status": "ok", "data": {"message": cached}} if cached else await self._call_api("get_message", {"message_scene": scene, "peer_id": peer, "message_seq": int(message_id)})
+        if not cached and (result.get("status") != "ok" or not (result.get("data") or {}).get("message")) and int(message_id) > 0:
+            history = await self._call_api("get_history_messages", {"message_scene": scene, "peer_id": peer,
+                                          "start_message_seq": int(message_id), "limit": 5})
+            if history.get("status") == "ok":
+                for message in (history.get("data") or {}).get("messages", []):
+                    self._cache_message({**message, "message_scene": scene, "peer_id": peer})
+                    if int(message.get("message_seq", -1)) == int(message_id):
+                        result = {"status": "ok", "data": {"message": message}}
         if result.get("status") == "ok":
             message = (result.get("data") or {}).get("message", {})
-            sender = message.get("group_member") or message.get("friend") or {}
+            if not message:
+                return None
+            self._cache_message({**message, "message_scene": scene, "peer_id": peer, "message_seq": int(message_id)})
+            sender = message.get("group_member") or message.get("friend") or message.get("sender") or {}
             user_id = int(message.get("sender_id", sender.get("user_id", 0)))
             segments = self.milky_to_onebot_segments(await self._resolve_media_segments(message.get("segments", [])))
             event = {"post_type": "message", "message_type": "group" if scene == "group" else "private",
@@ -1022,6 +1111,9 @@ class MilkyAdapter:
                 await self._http_client.aclose()
             except Exception:
                 pass
+        if self._message_db is not None:
+            self._message_db.close()
+            self._message_db = None
 
     async def aclose(self):
         await self.close()
