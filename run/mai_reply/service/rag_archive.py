@@ -111,9 +111,8 @@ class EpisodeArchive:
             return inserted, count, turns
         try:
             inserted, count, turns = await asyncio.to_thread(self._run_db, insert)
-            if inserted:
-                self._log("[MaiReply RAG] 缓冲 scope=%s 新增=%d 消息 待归档=%d 完成轮数=%d（未逐条调用embedding）",
-                          scope, inserted, count, turns)
+            #if inserted:
+                #self._log("[MaiReply RAG] 缓冲 scope=%s 新增=%d 消息 待归档=%d 完成轮数=%d（未逐条调用embedding）",scope, inserted, count, turns)
             self._kick()
         except Exception as exc:
             self._warn("消息缓冲失败", exc)

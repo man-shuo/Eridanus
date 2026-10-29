@@ -1,6 +1,6 @@
 
 enable: false  # RAG 为独立的第三层记忆，既可单用，也可与 impression/slots 共存。
-integration_mode: replace  # replace: 回复只注入RAG；augment: 与旧记忆叠加（不保证省token）
+integration_mode: augment  # replace: 回复只注入RAG；augment: 与旧记忆叠加（不保证省token）
 db_path: data/dataBase/mai_rag_memory.db
 private:
   enable: true
