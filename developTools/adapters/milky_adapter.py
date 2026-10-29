@@ -294,15 +294,15 @@ class MilkyAdapter:
                 ob_segs.append({"type": stype, "data": sdata})
         return ob_segs
 
-    async def _resolve_media_segments(self, segments):
+    async def _resolve_media_segments(self, segments, refresh=False):
         resolved = []
         for segment in segments:
             segment = {**segment, "data": dict(segment.get("data", {}))}
             media = segment["data"]
-            if segment.get("type") in ("image", "record", "video") and media.get("resource_id") and not media.get("temp_url"):
+            if segment.get("type") in ("image", "record", "video") and media.get("resource_id") and (refresh or not media.get("temp_url")):
                 result = await self._call_api("get_resource_temp_url", {"resource_id": media["resource_id"]})
                 if result.get("status") == "ok":
-                    media["temp_url"] = (result.get("data") or {}).get("url", "")
+                    media["temp_url"] = (result.get("data") or {}).get("url") or media.get("temp_url", "")
             resolved.append(segment)
         return resolved
 
@@ -353,11 +353,14 @@ class MilkyAdapter:
                         if native_seq == 0:
                             identity = json.dumps([self.id, scene, peer, quoted], sort_keys=True, ensure_ascii=False)
                             quoted["message_seq"] = -int(hashlib.sha256(identity.encode()).hexdigest()[:15], 16) - 1
-                        self._cache_message({"message_scene": scene, "peer_id": peer,
-                            "message_seq": quoted["message_seq"], "sender_id": quoted.get("sender_id", 0),
-                            "native_message_seq": native_seq,
-                            "time": quoted.get("time", event_time), "segments": quoted["segments"],
-                            "sender": {"user_id": quoted.get("sender_id", 0), "nickname": quoted.get("sender_name") or ""}})
+                        # Reply payloads may contain only an abbreviated image/text preview.
+                        # Keep the full original if it has already been received or fetched.
+                        if self._cached_message(scene, peer, quoted["message_seq"]) is None:
+                            self._cache_message({"message_scene": scene, "peer_id": peer,
+                                "message_seq": quoted["message_seq"], "sender_id": quoted.get("sender_id", 0),
+                                "native_message_seq": native_seq,
+                                "time": quoted.get("time", event_time), "segments": quoted["segments"],
+                                "sender": {"user_id": quoted.get("sender_id", 0), "nickname": quoted.get("sender_name") or ""}})
             sender_info = event_data.get("group_member") or event_data.get("friend") or event_data.get("sender", {})
             milky_segments = await self._resolve_media_segments(event_data.get("segments", []))
             ob_message = self.milky_to_onebot_segments(milky_segments)
@@ -879,7 +882,7 @@ class MilkyAdapter:
             self._cache_message({**message, "message_scene": scene, "peer_id": peer, "message_seq": int(message_id)})
             sender = message.get("group_member") or message.get("friend") or message.get("sender") or {}
             user_id = int(message.get("sender_id", sender.get("user_id", 0)))
-            segments = self.milky_to_onebot_segments(await self._resolve_media_segments(message.get("segments", [])))
+            segments = self.milky_to_onebot_segments(await self._resolve_media_segments(message.get("segments", []), refresh=True))
             event = {"post_type": "message", "message_type": "group" if scene == "group" else "private",
                      "sub_type": "normal" if scene == "group" else "friend", "self_id": self.id,
                      "time": message.get("time", int(time.time())), "message_id": int(message_id),
