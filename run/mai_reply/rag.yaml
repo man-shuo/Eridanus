@@ -6,7 +6,7 @@ private:
   enable: true
 group:
   enable: true
-  whitelist_enabled: true
+  whitelist_enabled: true  # false：所有群；true：仅下方白名单（空列表表示不允许任何群）
   whitelist: []
   observe_untriggered: true  # 旁观消息也沉淀；仅作用于上面允许的群
 embedding:
@@ -28,17 +28,33 @@ embedding:
     api_token_env: CLOUDFLARE_API_TOKEN
     timeout_seconds: 30
     query_instruction: ''  # BGE-M3 使用原文，无需 Instruct/Query 前缀
+archive:
+  private_turns: 3  # 每3轮完整的用户/Bot对话归档一次
+  group_messages: 10  # 群内累计10条用户消息归档，Bot发言一起保留但不占此计数
+  idle_seconds: 600  # 不足阈值的尾段空闲10分钟后归档；0表示关闭空闲补归档
+  max_buffer_chars: 6000  # 内容过多时提前归档，控制单个缓冲区大小
+  max_buffer_messages: 200  # 原始缓冲的容量保护，包含Bot单独发言
+  chunk_chars: 1800  # 按完整发言组织片段，超过时切分并保留上下文
+  overlap_messages: 2
+  context_gap_seconds: 1800
 index:
-  min_text_chars: 10
-  chunk_chars: 360
   max_message_chars: 16000
-  batch_size: 16
+  batch_size: 16  # 已归档片段合并请求的上限；原始消息不逐条调用embedding
   retry_seconds: 60
   max_pending: 10000
+logging:
+  enable: true  # 输出启动、入库、索引、检索日志；不记录消息原文或密钥
 retention:
   days: 365
   max_per_scope: 4000
 retrieval:
+  mode: adaptive  # 寒暄/确认消息跳过查询；其他回复按需检索
+  context_messages: 4
+  context_chars: 700
+  query_cache_seconds: 300  # 相同补全查询的向量复用，减少接口调用
+  query_cache_size: 256
+  anchor_seconds: 1800  # 同一用户/会话内短期保留上次召回对象，辅助“那家/那个”
+  ambiguity_margin: 0.08  # 多个候选接近时提示Bot追问，不擅自认定
   top_k: 3
   min_similarity: 0.50
   max_prompt_tokens: 640  # 记忆区严格上限，按UTF-8字节保守计数，含提示词包装

@@ -196,6 +196,8 @@ def main(bot: ExtendBot, config: YAMLManager):
     @bot.on(LifecycleMetaEvent)
     async def start_proactive_loop(_event):
         nonlocal proactive_task
+        if engine.rag_memory.enable:
+            engine.rag_memory.start()
         if proactive_task is None or proactive_task.done():
             proactive_task = asyncio.create_task(proactive_loop(), name="mai-reply-proactive")
 
@@ -439,8 +441,9 @@ def main(bot: ExtendBot, config: YAMLManager):
                         message_context_text,
                         user_id=event.user_id,  # ← 传入 user_id
                     )
-                    if engine.rag_memory.cfg.get("group", {}).get("observe_untriggered", True):
-                        await engine.rag_memory.remember(
+                    if (engine.rag_memory.allowed(event.group_id)
+                            and engine.rag_memory.cfg.get("group", {}).get("observe_untriggered", True)):
+                        await engine.rag_memory.observe(
                             event.group_id, event.user_id, user_name, message_context_text,
                             message_id=getattr(event, "message_id", None),
                         )

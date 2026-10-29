@@ -384,7 +384,10 @@ class ProactiveService:
         global_memory = self.context.get_global_memory() if hasattr(self.context, "get_global_memory") else ""
         rag_memory = ""
         if rag and user_id and rag.allowed():
-            rag_memory = await rag.recall(None, user_id, f"{decision.get('topic', '')} {decision.get('care_points', '')}")
+            rag_memory = await rag.recall(
+                None, user_id, f"{decision.get('topic', '')} {decision.get('care_points', '')}",
+                recent_context=self.context.get_session_history(None, user_id),
+            )
         system_prompt = self.prompt_builder.build_system_prompt(
             bot_name=bot_name,
             user_name=user_name,
@@ -457,6 +460,7 @@ class ProactiveService:
             return
 
         full_reply_text = "||".join(segments)
+        rag_sent_parts = []
 
         # 逐段模拟打字延迟并发送
         for i, seg in enumerate(segments):
@@ -471,6 +475,7 @@ class ProactiveService:
             # 调用官方协议接口发送私聊纯文本
             try:
                 await bot.send_friend_message(user_id, [Text(seg_text)])
+                rag_sent_parts.append(seg_text)
                 logger.info(f"[MaiReply Proactive] -> {user_id} 发送成功: {seg_text}")
             except Exception as e:
                 logger.error(f"[MaiReply Proactive] -> {user_id} 发送异常: {e}", exc_info=True)
@@ -480,6 +485,11 @@ class ProactiveService:
 
         # 记录本次成功关怀的时间，防止短时间内重复触发
         self._last_proactive_time[user_id] = time.time()
+
+        rag = getattr(self.engine, "rag_memory", None)
+        if rag and rag.allowed() and rag_sent_parts:
+            await rag.observe(None, user_id, self.prompt_builder.get_bot_name("Bot"),
+                              "||".join(rag_sent_parts), role="assistant")
 
         # 将主动发送的消息写回会话历史，保证用户回复时能顺畅承接
         try:

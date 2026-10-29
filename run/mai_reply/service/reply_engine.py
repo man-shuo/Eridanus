@@ -261,6 +261,8 @@ class ReplyEngine:
 
         await self.concurrency.acquire_global()
         lock_acquired = False  # 初始化锁状态变量
+        rag_active = False
+        rag_turn_recorded = False
         try:
             # 【关键修复 3】：恢复被误删的 Redis 锁，防止同一个用户的上下文数据库写冲突
             lock_timeout = self.cfg.mai_reply.config.get("concurrency", {}).get("lock_timeout", 30)
@@ -276,19 +278,6 @@ class ReplyEngine:
                 # 传入 user_id 以便发言者追踪
                 self.context.push_group_window(group_id, user_name, final_text, user_id=user_id)
 
-            # 独立开关；先检索旧事件，当前消息随后进入持久化队列，避免自己命中自己。
-            rag_memory = ""
-            rag_replace = self.rag_memory.allowed(group_id) and self.rag_memory.replaces_legacy
-            if self.rag_memory.allowed(group_id):
-                recall_query = f"当前发言者 {user_name}(ID:{user_id}): {final_text}"
-                if is_group:
-                    recall_query = self.context.build_group_context_snippet(group_id, bot_name)[-1200:] + "\n" + recall_query
-                rag_memory = await self.rag_memory.recall(group_id, user_id, recall_query)
-                await self.rag_memory.remember(
-                    group_id, user_id, user_name, final_text,
-                    message_id=getattr(event, "message_id", None),
-                )
-
             # 提取历史对话上下文：群聊被@时精简提取少量私聊/群聊上下文（默认2-3轮），把宝贵窗口留给群公屏
             max_turns = self.cfg.mai_reply.config.get("context", {}).get("max_turns", 20)
             max_history_msgs = max_turns * 2
@@ -302,6 +291,16 @@ class ReplyEngine:
             group_context = ""
             if is_group:
                 group_context = self.context.build_group_context_snippet(group_id, bot_name)
+
+            # RAG 关闭时不执行查询/归档，也不额外读取上下文；旧记忆逻辑保持原状。
+            rag_memory = ""
+            rag_active = self.rag_memory.allowed(group_id)
+            rag_replace = rag_active and self.rag_memory.replaces_legacy
+            if rag_active:
+                recent_context = self.context._load_group_window(group_id) if is_group else trimmed_history
+                rag_memory = await self.rag_memory.recall(
+                    group_id, user_id, final_text, recent_context=recent_context,
+                )
 
             # 内存模式感知：按配置动态读取用户记忆（slots / impression / both）
             user_mem_mode = self.context.get_effective_user_memory_mode() if hasattr(self.context, "get_effective_user_memory_mode") else "slots"
@@ -441,6 +440,15 @@ class ReplyEngine:
             if is_group:
                 self.context.push_group_window(group_id, bot_name, final_reply_text)
 
+            if rag_active:
+                # 只在真实发出回复后记录完整一轮；被抢占/失败的生成不伪造 Bot 发言。
+                await self.rag_memory.record_turn(
+                    group_id, user_id, user_name, history_user_text,
+                    "||".join(all_sent_segments), bot_name=bot_name,
+                    message_id=getattr(event, "message_id", None),
+                )
+                rag_turn_recorded = True
+
             self.impression_updater.tick(user_id, group_id, user_name, bot_name)
             self.audit_system.tick(user_id, group_id, user_name, bot_name, bot)
 
@@ -474,6 +482,13 @@ class ReplyEngine:
             bot.logger.error(f"[MaiReply] 回复出错: {e}", exc_info=True)
             traceback.print_exc()
         finally:
+            if rag_active and not rag_turn_recorded:
+                # 回复失败/被抢占时仍保留真实用户发言，不虚构一轮已完成对话。
+                try:
+                    await self.rag_memory.observe(group_id, user_id, user_name, final_text,
+                                                  message_id=getattr(event, "message_id", None))
+                except Exception as exc:
+                    logger.warning("[MaiReply RAG] 未完成对话的用户消息缓冲失败 (%s)", type(exc).__name__)
             # 任务结束（无论正常/取消/异常）时从抢占表注销自身，并释放全局信号量
             await self.concurrency.unregister_task(session_key, current_task)
             if lock_acquired:
