@@ -492,6 +492,21 @@ class DynamicScheduler:
         logger.info(f"[DynamicScheduler] 成功创建任务: {task.task_id} ({task.description}), 下次触发: {datetime.datetime.fromtimestamp(next_ts)}")
         return task
 
+    async def remove_task(self, task_id: str) -> bool:
+        """根据 task_id 直接将任务状态置为 cancelled 并取消调度"""
+        await self.init_db()
+        async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
+            cursor = await db.execute(
+                "UPDATE dynamic_tasks SET status = 'cancelled' WHERE task_id = ? AND status = 'active'",
+                (task_id,)
+            )
+            await db.commit()
+            affected = cursor.rowcount
+        if affected > 0:
+            logger.info(f"[DynamicScheduler] 成功取消/移除任务: {task_id}")
+            return True
+        return False
+
     async def cancel_tasks(
         self,
         task_id_or_keyword: str,
@@ -772,6 +787,19 @@ class DynamicScheduler:
 
             # 2. 自然语言 / 提示词触发生成个性化消息（早安、叫起床、喝水提醒等）或需要由LLM生成的任务
             elif task.action_type in ("message", "prompt", "reminder", "morning_greeting", "night_greeting"):
+                # 检查早晚安等特定任务的全局开关
+                if task.action_type == "morning_greeting" or task.task_type == "morning_greeting":
+                    st_cfg = getattr(config, "scheduled_tasks", None)
+                    m_enable = st_cfg.config.get("scheduledTasks", {}).get("早安问候", {}).get("enable", False) if st_cfg and hasattr(st_cfg, "config") else False
+                    if not m_enable:
+                        logger.info(f"[DynamicScheduler] scheduledTasks.早安问候 未启动，跳过执行 {task.task_id}")
+                        return
+                elif task.action_type == "night_greeting" or task.task_type == "night_greeting":
+                    st_cfg = getattr(config, "scheduled_tasks", None)
+                    n_enable = st_cfg.config.get("scheduledTasks", {}).get("晚安问候", {}).get("enable", False) if st_cfg and hasattr(st_cfg, "config") else False
+                    if not n_enable:
+                        logger.info(f"[DynamicScheduler] scheduledTasks.晚安问候 未启动，跳过执行 {task.task_id}")
+                        return
                 prompt = payload.get("prompt") or payload.get("message") or task.description
                 sent = False
 
@@ -842,7 +870,19 @@ class DynamicScheduler:
                             await bot.send_group_message(task.target_id, [Text(text)] if isinstance(text, str) else text)
             # 3. 主动私聊决策联动 (proactive_chat)
             elif task.action_type == "proactive_chat":
+                proactive_enabled = False
                 if config and hasattr(config, "mai_reply") and config.mai_reply.config.get("enable", False):
+                    p_cfg = getattr(config.mai_reply, "proactive", {})
+                    if not isinstance(p_cfg, dict):
+                        p_cfg = config.mai_reply.config.get("proactive", {})
+                    if isinstance(p_cfg, dict) and p_cfg.get("enable", False):
+                        proactive_enabled = True
+
+                if not proactive_enabled:
+                    logger.info(f"[DynamicScheduler] mai_reply 或 proactive 开关未启动，跳过执行主动关怀任务 {task.task_id}")
+                    return
+
+                if True:
                     from run.mai_reply.service.proactive_service import ProactiveService
                     from run.mai_reply.service.reply_engine import ReplyEngine
                     engine = ReplyEngine(config)
@@ -907,11 +947,29 @@ class DynamicScheduler:
         morning_cfg = scheduled_tasks_cfg.get("早安问候", {})
         night_cfg = scheduled_tasks_cfg.get("晚安问候", {})
 
-        morning_enable = morning_cfg.get("enable", False)
-        night_enable = night_cfg.get("enable", False)
+        morning_enable = bool(morning_cfg.get("enable", False))
+        night_enable = bool(night_cfg.get("enable", False))
+
+        # 若早安问候未启用，取消数据库中遗留的 active 早安任务
+        if not morning_enable:
+            async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
+                await db.execute(
+                    "UPDATE dynamic_tasks SET status = 'cancelled' WHERE (task_type = 'morning_greeting' OR task_id LIKE 'daily_morning_%') AND status = 'active'"
+                )
+                await db.commit()
+            logger.info("[DynamicScheduler] 早安问候未启用，已清理/取消所有旧的早安任务")
+
+        # 若晚安问候未启用，取消数据库中遗留的 active 晚安任务
+        if not night_enable:
+            async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
+                await db.execute(
+                    "UPDATE dynamic_tasks SET status = 'cancelled' WHERE (task_type = 'night_greeting' OR task_id LIKE 'daily_night_%') AND status = 'active'"
+                )
+                await db.commit()
+            logger.info("[DynamicScheduler] 晚安问候未启用，已清理/取消所有旧的晚安任务")
 
         if not morning_enable and not night_enable:
-            logger.info("[DynamicScheduler] 早安问候与晚安问候均未启用")
+            logger.info("[DynamicScheduler] 早安问候与晚安问候均未启用，同步结束")
             return
 
         from framework_common.database_util.User import get_users_with_permission_above, get_user
@@ -951,6 +1009,20 @@ class DynamicScheduler:
                 except Exception:
                     trusted_set = set()
 
+            # 清理不再满足权限条件或不再在好友列表中的旧早安任务
+            async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT task_id, target_id FROM dynamic_tasks WHERE (task_type = 'morning_greeting' OR task_id LIKE 'daily_morning_%') AND status = 'active'"
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        tid = row["task_id"]
+                        t_uid = row["target_id"]
+                        if (t_uid not in friend_ids) or (m_only_trust and t_uid not in trusted_set):
+                            await db.execute("UPDATE dynamic_tasks SET status = 'cancelled' WHERE task_id = ?", (tid,))
+                await db.commit()
+
             for uid in friend_ids:
                 if m_only_trust and uid not in trusted_set:
                     continue
@@ -988,6 +1060,20 @@ class DynamicScheduler:
                     trusted_set = set(await get_users_with_permission_above(n_threshold))
                 except Exception:
                     trusted_set = set()
+
+            # 清理不再满足权限条件或不再在好友列表中的旧晚安任务
+            async with aiosqlite.connect(getattr(self, 'db_path', DB_PATH)) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT task_id, target_id FROM dynamic_tasks WHERE (task_type = 'night_greeting' OR task_id LIKE 'daily_night_%') AND status = 'active'"
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        tid = row["task_id"]
+                        t_uid = row["target_id"]
+                        if (t_uid not in friend_ids) or (n_only_trust and t_uid not in trusted_set):
+                            await db.execute("UPDATE dynamic_tasks SET status = 'cancelled' WHERE task_id = ?", (tid,))
+                await db.commit()
 
             for uid in friend_ids:
                 if n_only_trust and uid not in trusted_set:

@@ -139,10 +139,23 @@ class ProactiveService:
         self._last_proactive_time: Dict[int, float] = {}
 
     def get_proactive_config(self) -> dict:
-        """安全读取主动消息配置"""
-        p_cfg = getattr(self.cfg.mai_reply, "proactive", {})
+        """安全读取主动消息配置，优先从 YAMLManager 客户端读取，若缺失则直接回退读取 run/mai_reply/proactive.yaml"""
+        p_cfg = None
+        if hasattr(self, "cfg") and hasattr(self.cfg, "mai_reply"):
+            p_cfg = getattr(self.cfg.mai_reply, "proactive", None)
+            if not isinstance(p_cfg, dict) and hasattr(self.cfg.mai_reply, "config") and isinstance(self.cfg.mai_reply.config, dict):
+                p_cfg = self.cfg.mai_reply.config.get("proactive", None)
         if not isinstance(p_cfg, dict):
-            p_cfg = self.cfg.mai_reply.config.get("proactive", {})
+            try:
+                import os, yaml
+                yaml_path = os.path.join(os.path.dirname(__file__), "..", "proactive.yaml")
+                if os.path.exists(yaml_path):
+                    with open(yaml_path, "r", encoding="utf-8") as yf:
+                        loaded = yaml.safe_load(yf)
+                        if isinstance(loaded, dict):
+                            p_cfg = loaded
+            except Exception as e:
+                logger.warning(f"[MaiReply Proactive] 回退读取 proactive.yaml 失败: {e}")
         return p_cfg if isinstance(p_cfg, dict) else {}
 
     def is_user_in_cooldown(self, user_id: int, cooldown_hours: float) -> bool:
