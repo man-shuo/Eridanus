@@ -86,12 +86,14 @@ context: # 上下文相关配置
   anti_nsfw:
     enable: false          # 是否开启审核系统，模型默认用trigger_llm的
     trigger_turns: 5      # 几轮对话触发一次审查
-  follow_up: # 对话未完成主动追问机制
-    enable: true                 # 是否开启对话未完成主动追问机制
-    idle_seconds: 40            # 静默等待时间（秒），最后一条为Bot回复且超时后触发判定
+  follow_up: # 对话未完结主动追问机制
+    enable: false                # 是否开启对话未完结主动追问机制（可随时关闭，立即生效）
+    idle_seconds: 180            # 静默等待时间（秒）：最后一条为Bot回复且超时后触发判定（建议180秒以上，40秒太短容易频繁打扰）
+    max_idle_seconds: 1800       # 最大有效追问窗口（秒）：默认30分钟（1800秒）。超过此时间的远古会话直接跳过，绝不打扰！
     check_interval_seconds: 30   # 后台巡检轮询间隔（秒）
     private_only: true           # 是否仅在私聊生效（群聊默认不追问，避免插话打扰）
-    max_follow_up_turns: 2       # 最多连续追问轮次（默认2），追问后用户若无回复，达到该次数后彻底停止追问，防止无限循环
+    max_follow_up_turns: 2       # 最大连续追问轮次（默认2次）：追问后用户仍无回复，达到该次数后彻底停止追问，防止死循环
+    require_friend: true         # 必须是QQ好友才追问，绝不私聊骚扰非好友或群成员
 
 human_like:  # 模拟人类回复特征的配置
   typing_delay_ms_per_char: 30 # 打字延迟模拟（毫秒/字，0=关闭）
