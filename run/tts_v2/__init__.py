@@ -2,7 +2,7 @@
 
 dynamic_imports = {
     "run.tts_v2.service.tts": [
-        "tts",
+        "call_tts",
         "get_all_speakers",
         "get_breeze_tags",
         "clone_voice",
@@ -12,7 +12,7 @@ dynamic_imports = {
 
 function_declarations = [
     {
-        "name": "tts",
+        "name": "call_tts",
         "description": "语音合成并发送语音消息。",
         "parameters": {
             "type": "object",

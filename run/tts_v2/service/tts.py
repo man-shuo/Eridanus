@@ -665,7 +665,7 @@ class TTS:
 _default_tts = TTS()
 
 
-async def tts(
+async def call_tts(
     bot,
     event,
     config,
