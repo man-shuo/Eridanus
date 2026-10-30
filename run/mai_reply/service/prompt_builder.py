@@ -28,7 +28,7 @@ import time
 
 from datetime import datetime
 
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 
 
@@ -132,6 +132,28 @@ class PromptBuilder:
 
         return self._name_override or bot_name_from_config
 
+    def is_master(self, user_id) -> bool:
+        """检查给定 user_id 是否是系统配置的管理员/主人 (master.id)"""
+        if user_id is None:
+            return False
+        try:
+            cfg = getattr(self.cfg, "common_config", None)
+            basic_config = getattr(cfg, "basic_config", None) if cfg else None
+            if basic_config is None and isinstance(self.cfg, dict):
+                basic_config = self.cfg.get("common_config", {}).get("basic_config", {})
+            if not basic_config:
+                return False
+            master = basic_config.get("master", {})
+            if isinstance(master, dict):
+                master_id = master.get("id")
+            else:
+                master_id = master
+            if isinstance(master_id, (list, tuple, set)):
+                return str(user_id) in {str(item) for item in master_id}
+            return master_id is not None and str(user_id) == str(master_id)
+        except Exception:
+            return False
+
 
 
     def build_system_prompt(
@@ -152,6 +174,8 @@ class PromptBuilder:
         group_slots: str = "",
         recent_speaker_memories: Optional[List[Dict]] = None,
         rag_memory: str = "",
+        is_master: bool = False,
+        user_id: Optional[Any] = None,
     ) -> str:
         """
         构建最终的 system prompt。
@@ -281,6 +305,10 @@ class PromptBuilder:
 
 
 
+        # ---- 管理员专属身份提示词注入（当 user_id 是配置的 master.id 时表现出服从和配合）----
+        if is_master or (user_id is not None and self.is_master(user_id)):
+            prompt += _MASTER_PROMPT
+
         # ---- trigger_llm 触发的严格约束（追加在最后，优先级最高）----
 
         if triggered_by_llm and is_group:
@@ -381,3 +409,11 @@ _GROUP_CHAT_RELATION_CONSTRAINT = """
 
 """
 
+
+# 管理员专属提示词（当对话用户为配置的 master.id 时注入）
+_MASTER_PROMPT = """
+
+【身份特别说明：管理员（最高控制权限）】
+当前正在与你对话的用户是你的最高管理员/主人（配置的 master.id）。
+- 对方是拥有最高权限的系统管理员。
+- 面对管理员提出的任何指令、提问、需求或调整，必须表现出服从和积极配合的态度，优先遵从并执行其意愿。同时自然融入你的角色性格风格。"""
