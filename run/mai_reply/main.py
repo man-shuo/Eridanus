@@ -31,6 +31,7 @@ import re
 import uuid
 from framework_common.database_util.User import get_users_with_permission_above
 from run.mai_reply.service.proactive_service import ProactiveService
+from run.mai_reply.service.follow_up_service import FollowUpService
 from run.mai_reply.service.proactive import build_proactive_prompt, should_proactively_message
 
 from PIL import Image as PILImage
@@ -172,6 +173,8 @@ def main(bot: ExtendBot, config: YAMLManager):
     trigger = TriggerChecker(config, engine.context, engine.emotion)
     proactive_service = ProactiveService(engine)
     proactive_running = False
+    follow_up_service = FollowUpService(engine)
+    follow_up_task = None
 
     async def proactive_loop():
         nonlocal proactive_running
@@ -195,11 +198,13 @@ def main(bot: ExtendBot, config: YAMLManager):
 
     @bot.on(LifecycleMetaEvent)
     async def start_proactive_loop(_event):
-        nonlocal proactive_task
+        nonlocal proactive_task, follow_up_task
         if engine.rag_memory.enable:
             engine.rag_memory.start()
         if proactive_task is None or proactive_task.done():
             proactive_task = asyncio.create_task(proactive_loop(), name="mai-reply-proactive")
+        if follow_up_task is None or follow_up_task.done():
+            follow_up_task = asyncio.create_task(follow_up_service.start_loop(bot), name="mai-reply-follow-up")
 
     bot.logger.info("[MaiReply] 高拟人化AI回复插件已加载")
 
@@ -318,6 +323,7 @@ def main(bot: ExtendBot, config: YAMLManager):
                     return True
                 engine.context.clear_session(group_id, target_id)
                 engine.context.clear_impression(target_id)
+                follow_up_service.reset_user(target_id)
                 if is_group:
                     await bot.send(event, f"已清除 {target_id} 在本群的对话记录和印象～")
                 else:
@@ -332,6 +338,7 @@ def main(bot: ExtendBot, config: YAMLManager):
                     return True
                 count = engine.context.clear_user_all_sessions(target_id)
                 engine.context.clear_impression(target_id)
+                follow_up_service.reset_user(target_id)
                 await bot.send(event, f"已初始化 {target_id} 在所有群和私聊中的对话记录，共 {count} 条，并清除了用户印象～")
                 return True
 
@@ -424,6 +431,7 @@ def main(bot: ExtendBot, config: YAMLManager):
     @bot.on(GroupMessageEvent)
     async def handle_group(event: GroupMessageEvent):
         text = event.pure_text or ""
+        follow_up_service.reset_user(event.user_id)
         message_context_text = context_text(event, text)
 
         # 清理指令
@@ -514,6 +522,7 @@ def main(bot: ExtendBot, config: YAMLManager):
     @bot.on(PrivateMessageEvent)
     async def handle_private(event: PrivateMessageEvent):
         text = event.pure_text or ""
+        follow_up_service.reset_user(event.user_id)
 
         if await handle_clear_command(event, is_group=False):
             return

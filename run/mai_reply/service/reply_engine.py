@@ -211,8 +211,9 @@ class ReplyEngine:
         include_tools: bool = True,       # 是否注入 tools（定时任务或纯问候可设为 False 节省大量 token）
         tools_override: Optional[dict] = None,  # 自定义覆盖 tools 映射（按需仅传特定工具）
         system_prompt_prefix: Optional[str] = None,  # 前置注入的系统指令提示词（明确系统定时事件来源，防抢台词误判）
+        history_user_text: Optional[str] = None,  # 可选：写入历史记录的替代文本（避免系统引导词被当成用户说话写入历史）
     ) -> None:
-        is_group = isinstance(event, GroupMessageEvent)
+        is_group = isinstance(event, GroupMessageEvent) or bool(getattr(event, "group_id", None))
         group_id: Optional[int] = getattr(event, "group_id", None) if is_group else None
         user_id: int = event.user_id
 
@@ -430,12 +431,14 @@ class ReplyEngine:
                 asyncio.create_task(self._async_tts_and_send(bot, event, combined_text, voice_cfg))
 
             # 更新历史（只有真正发出回复才更新，被抢占的任务不写历史）
-            if isinstance(multimodal_content, list):
-                history_user_text = final_text + " [含图片]" if final_text else "[图片]"
+            if history_user_text is not None:
+                effective_user_text = history_user_text
+            elif isinstance(multimodal_content, list):
+                effective_user_text = final_text + " [含图片]" if final_text else "[图片]"
             else:
-                history_user_text = final_text
+                effective_user_text = final_text
 
-            self.context.append_to_session(group_id, user_id, history_user_text, final_reply_text)
+            self.context.append_to_session(group_id, user_id, effective_user_text, final_reply_text)
 
             if is_group:
                 self.context.push_group_window(group_id, bot_name, final_reply_text)
@@ -443,7 +446,7 @@ class ReplyEngine:
             if rag_active:
                 # 只在真实发出回复后记录完整一轮；被抢占/失败的生成不伪造 Bot 发言。
                 await self.rag_memory.record_turn(
-                    group_id, user_id, user_name, history_user_text,
+                    group_id, user_id, user_name, effective_user_text,
                     "||".join(all_sent_segments), bot_name=bot_name,
                     message_id=getattr(event, "message_id", None),
                 )

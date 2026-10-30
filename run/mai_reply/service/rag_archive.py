@@ -290,8 +290,20 @@ class EpisodeArchive:
         category = str(fact.get("category", "general")).strip()
         target_type = str(fact.get("target_type", "user")).strip()
 
+        # 1. 严格内容去重：检查该 scope 与 target 下是否已有完全相同文本的活跃事实
+        # 若已有完全一致的有效事实，仅刷新 updated_at，保留已有 vector 不重置，彻底防止重复调用 Embedding
+        exact_row = db.execute("""
+            SELECT id, text FROM memories
+            WHERE scope=? AND target_id=? AND text=? AND fact_type='fact' AND ended IS NULL
+            LIMIT 1
+        """, (fact_scope, target_id, content)).fetchone()
+
+        if exact_row:
+            db.execute("UPDATE memories SET updated_at=? WHERE id=?", (now, exact_row[0]))
+            self._log("[MaiReply RAG] Mem0 事实无变化，保留已有向量不重算 scope=%s target=%s: %s", fact_scope, target_name, content)
+            return
+
         if action == "ADD":
-            # 查找同 scope、同 target、同 category 是否已有相似事实
             row = db.execute("""
                 SELECT id, text FROM memories
                 WHERE scope=? AND target_id=? AND category=? AND fact_type='fact' AND ended IS NULL
@@ -299,13 +311,17 @@ class EpisodeArchive:
             """, (fact_scope, target_id, category)).fetchone()
 
             if row:
-                # 若已有同类事实，做语义合并更新
-                updated_text = f"{content}"
-                db.execute("""
-                    UPDATE memories SET text=?, updated_at=?, vector=NULL
-                    WHERE id=?
-                """, (updated_text, now, row[0]))
-                self._log("[MaiReply RAG] Mem0 合并更新事实 scope=%s target=%s: %s", fact_scope, target_name, content)
+                old_text = (row[1] or "").strip()
+                if old_text == content:
+                    db.execute("UPDATE memories SET updated_at=? WHERE id=?", (now, row[0]))
+                    self._log("[MaiReply RAG] Mem0 事实无变化，保留已有向量 scope=%s target=%s: %s", fact_scope, target_name, content)
+                else:
+                    # 内容确实变化，更新文本并重置 vector=NULL 重新索引
+                    db.execute("""
+                        UPDATE memories SET text=?, updated_at=?, vector=NULL
+                        WHERE id=?
+                    """, (content, now, row[0]))
+                    self._log("[MaiReply RAG] Mem0 更新事实 scope=%s target=%s: %s", fact_scope, target_name, content)
             else:
                 db.execute("""
                     INSERT INTO memories (
@@ -317,17 +333,22 @@ class EpisodeArchive:
 
         elif action == "UPDATE":
             row = db.execute("""
-                SELECT id FROM memories
+                SELECT id, text FROM memories
                 WHERE scope=? AND target_id=? AND fact_type='fact' AND ended IS NULL
                 ORDER BY id DESC LIMIT 1
             """, (fact_scope, target_id)).fetchone()
 
             if row:
-                db.execute("""
-                    UPDATE memories SET text=?, updated_at=?, vector=NULL
-                    WHERE id=?
-                """, (content, now, row[0]))
-                self._log("[MaiReply RAG] Mem0 更新事实 scope=%s target=%s: %s", fact_scope, target_name, content)
+                old_text = (row[1] or "").strip()
+                if old_text == content:
+                    db.execute("UPDATE memories SET updated_at=? WHERE id=?", (now, row[0]))
+                    self._log("[MaiReply RAG] Mem0 事实无变化，保留已有向量 scope=%s target=%s: %s", fact_scope, target_name, content)
+                else:
+                    db.execute("""
+                        UPDATE memories SET text=?, updated_at=?, vector=NULL
+                        WHERE id=?
+                    """, (content, now, row[0]))
+                    self._log("[MaiReply RAG] Mem0 更新事实 scope=%s target=%s: %s", fact_scope, target_name, content)
             else:
                 db.execute("""
                     INSERT INTO memories (
@@ -335,6 +356,7 @@ class EpisodeArchive:
                         fact_type, category, target_id, target_name, updated_at
                     ) VALUES (?, ?, ?, NULL, ?, ?, 'fact', ?, ?, ?, ?)
                 """, (fact_scope, content, now, target_id, self._namespace, category, target_id, target_name, now))
+                self._log("[MaiReply RAG] Mem0 新增事实 scope=%s target=%s: %s", fact_scope, target_name, content)
 
         elif action == "DELETE":
             db.execute("""

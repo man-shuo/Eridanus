@@ -244,7 +244,7 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                 return vecs
 
     def _index_worker(self):
-        """后台异步向量化索引工作线程"""
+        """后台异步向量化索引线程（支持归档防抖批量合并）"""
         batch_size = max(1, int(self.cfg.get("index", {}).get("batch_size", 16)))
         retry_seconds = max(5.0, float(self.cfg.get("index", {}).get("retry_seconds", 60.0)))
         while not self._closed:
@@ -257,6 +257,14 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                 if not pending:
                     time.sleep(2.0)
                     continue
+
+                # 防抖聚合：若队列中条目未满 batch_size，稍微等待 1.0 秒，
+                # 聚合同一归档周期内由 trigger_llm 抽取并写入的 Mem0 事实，合并为单次批量 Embedding 请求
+                if len(pending) < batch_size:
+                    time.sleep(1.0)
+                    pending = self._run_db(self._pending, batch_size)
+                    if not pending:
+                        continue
 
                 texts = [self._embedding_text(r[1], r[3] if len(r) > 3 else "episode") for r in pending]
                 loop = asyncio.new_event_loop()
@@ -276,7 +284,7 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                 self._log("[MaiReply RAG] 成功向量化索引 %d 条记忆", saved)
             except Exception as exc:
                 self._cooldown = time.monotonic() + retry_seconds
-                self._warn("[MaiReply RAG] 向量化索引出错 (%s)，进入冷却 %.0fs", type(exc).__name__, retry_seconds)
+                self._warn("[MaiReply RAG] 向量化索引发生异常 (%s)，冷却等待 %.0fs", type(exc).__name__, retry_seconds)
                 time.sleep(2.0)
 
     def start(self):
