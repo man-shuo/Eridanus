@@ -259,7 +259,7 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                 return vecs
 
     def _index_worker(self):
-        """????????????????????????????????"""
+        """后台守护线程：消费未向量化的记忆并批量调用 Embedding API"""
         batch_size = max(1, int(self.cfg.get("index", {}).get("batch_size", 16)))
         retry_seconds = max(5.0, float(self.cfg.get("index", {}).get("retry_seconds", 60.0)))
         while not self._closed:
@@ -273,14 +273,14 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                     time.sleep(2.0)
                     continue
 
-                # ???????????? batch_size????? 1.0 ?????
+                # 每次最多处理 batch_size 条，避免阻塞与长时间并发；短轮询等待 1.0 秒
                 if len(pending) < batch_size:
                     time.sleep(1.0)
                     pending = self._run_db(self._pending, batch_size)
                     if not pending:
                         continue
 
-                # 1. ?????
+                # 1. 整理待处理条目
                 row_items = []
                 for r in pending:
                     row_id = r[0]
@@ -289,7 +289,7 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                     t = self._embedding_text(raw_text, ft)
                     row_items.append((row_id, raw_text, ft, t))
 
-                # 2. ?????????????????????????? API ?????
+                # 2. 优先检查本地数据库中是否已存在相同文本的向量，避免重复调用远程 API
                 text_to_vec: Dict[str, np.ndarray] = {}
                 def check_existing(db):
                     found = {}
@@ -308,7 +308,7 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                 existing_map = self._run_db(check_existing)
                 text_to_vec.update(existing_map)
 
-                # 3. ??????????????????????? Embedding
+                # 3. 仅对本地未曾计算过向量的唯一文本发起远程 Embedding 请求
                 unembedded_unique = []
                 for _, _, _, t in row_items:
                     if t not in text_to_vec and t not in unembedded_unique:
@@ -324,7 +324,7 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                     for t, v in zip(unembedded_unique, new_vecs):
                         text_to_vec[t] = v
 
-                # 4. ???????????
+                # 4. 批量写回数据库更新向量
                 updates = []
                 for row_id, _, _, t in row_items:
                     vec = text_to_vec.get(t)
@@ -338,10 +338,10 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                             updates
                         ).rowcount
                     saved = self._run_db(save)
-                    self._log("[MaiReply RAG] ??????? %d ??? (API??=%d, ??=%d)", saved, len(unembedded_unique), len(updates) - len(unembedded_unique))
+                    self._log("[MaiReply RAG] 成功向量化索引 %d 条记忆 (API调用=%d, 复用=%d)", saved, len(unembedded_unique), len(updates) - len(unembedded_unique))
             except Exception as exc:
                 self._cooldown = time.monotonic() + retry_seconds
-                self._warn("[MaiReply RAG] ????????? (%s)????? %.0fs: %s", type(exc).__name__, retry_seconds, exc)
+                self._warn("[MaiReply RAG] 向量化索引发生异常 (%s)，冷却等待 %.0fs: %s", type(exc).__name__, retry_seconds, exc)
                 time.sleep(2.0)
 
     def start(self):

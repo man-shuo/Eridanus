@@ -123,7 +123,7 @@ class EpisodeRetrieval:
                     self._query_cache.pop(oldest_k, None)
                 self._query_cache[query_text] = (now, q_vec)
             except Exception as exc:
-                self._warn(f"[MaiReply RAG] ?? Query Embedding ?????: {exc}")
+                self._warn(f"[MaiReply RAG] 生成 Query Embedding 超时或失败: {exc}")
                 return ""
 
         # -------------------------------------------------------------

@@ -178,7 +178,7 @@ class EpisodeArchive:
 
         try:
             now = time.time()
-            # 1. ?????? (fact_type='episode')
+            # 1. 保存对话片段 (fact_type='episode')
             chunk_lines = []
             for e in buf:
                 chunk_lines.append(f"{e['name']}: {e['text']}")
@@ -186,7 +186,7 @@ class EpisodeArchive:
 
             if episode_text:
                 def save_episode(db):
-                    # ?????? scope ???? episode ???????????
+                    # 检查是否与当前 scope 最新一条 episode 完全相同，避免短时间刷屏重复入库
                     last_ep = db.execute("""
                         SELECT text FROM memories
                         WHERE scope=? AND fact_type='episode' AND namespace=?
@@ -205,20 +205,20 @@ class EpisodeArchive:
                         buf[-1].get("message_id"),
                         self._namespace,
                         str(group_id) if is_group else str(user_id),
-                        f"?{group_id}" if is_group else "??",
+                        f"群{group_id}" if is_group else "私聊",
                         now
                     ))
 
                 try:
                     self._run_db(save_episode)
                 except Exception as exc:
-                    self._warn("[MaiReply RAG] ????????: %s", exc)
+                    self._warn("[MaiReply RAG] 保存历史片段失败: %s", exc)
 
-            # 2. ???? trigger_llm ?? Mem0 ????????????
+            # 2. 异步调用 trigger_llm 执行 Mem0 原子事实抽取与状态机更新
             try:
                 await self._extract_and_apply_mem0(scope, buf, is_group, group_id, user_id)
             except Exception as exc:
-                self._warn("[MaiReply RAG] Mem0 ?????? (%s): %s", type(exc).__name__, exc)
+                self._warn("[MaiReply RAG] Mem0 抽取事实失败 (%s): %s", type(exc).__name__, exc)
         finally:
             with self._buffer_lock:
                 self._flushing_scopes.discard(scope)
@@ -394,7 +394,7 @@ class EpisodeArchive:
 
     def _embedding_text(self, text: str, fact_type: str = "episode") -> str:
         if fact_type == "fact":
-            return f"????: {text}"
+            return f"事实记忆: {text}"
         return text
 
     def _recent_events(self, db, scope: str, limit: int = 6):
