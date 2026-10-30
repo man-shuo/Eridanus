@@ -136,6 +136,30 @@ class ReplyEngine:
 
     # --------------------------------------------------
 
+    def is_master(self, user_id) -> bool:
+        """检查给定 user_id 是否是系统配置的管理员/主人 (master.id)"""
+        if hasattr(self, "prompt_builder") and hasattr(self.prompt_builder, "is_master"):
+            return self.prompt_builder.is_master(user_id)
+        if user_id is None:
+            return False
+        try:
+            cfg = getattr(self.cfg, "common_config", None)
+            basic_config = getattr(cfg, "basic_config", None) if cfg else None
+            if basic_config is None and isinstance(self.cfg, dict):
+                basic_config = self.cfg.get("common_config", {}).get("basic_config", {})
+            if not basic_config:
+                return False
+            master = basic_config.get("master", {})
+            if isinstance(master, dict):
+                master_id = master.get("id")
+            else:
+                master_id = master
+            if isinstance(master_id, (list, tuple, set)):
+                return str(user_id) in {str(item) for item in master_id}
+            return master_id is not None and str(user_id) == str(master_id)
+        except Exception:
+            return False
+
     def _load_tools(self):
         tools = {}
         try:
@@ -337,6 +361,8 @@ class ReplyEngine:
                 user_memory=user_memory,
                 group_slots=group_slots,
                 rag_memory=rag_memory,
+                is_master=self.is_master(user_id),
+                user_id=user_id,
             )
             if system_prompt_prefix:
                 system_prompt = f"{system_prompt_prefix.strip()}\n\n{system_prompt}"
