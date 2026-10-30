@@ -49,6 +49,7 @@ class EpisodeArchive:
         self._buffers: Dict[str, List[Dict[str, Any]]] = {}
         self._buffer_lock = threading.Lock()
         self._last_archive_time: Dict[str, float] = {}
+        self._flushing_scopes = set()
 
         # 加载轻量 LLM (trigger_llm) 配置供 Mem0 抽取事实使用
         ccfg = getattr(config.mai_reply, "config", {})
@@ -127,6 +128,8 @@ class EpisodeArchive:
 
     def _append_events(self, scope: str, events: List[Dict[str, Any]], is_group: bool, group_id: Optional[str], user_id: Any):
         with self._buffer_lock:
+            if scope not in self._last_archive_time:
+                self._last_archive_time[scope] = time.time()
             buf = self._buffers.setdefault(scope, [])
             buf.extend(events)
             max_buf = int(self._archive_cfg.get("max_buffer_messages", 200))
@@ -140,6 +143,8 @@ class EpisodeArchive:
 
     def _archive_due(self, scope: str, buf: List[Dict[str, Any]], is_group: bool) -> bool:
         if not buf:
+            return False
+        if scope in self._flushing_scopes:
             return False
         if is_group:
             trigger_msgs = int(self._archive_cfg.get("group_messages", 10))
@@ -162,46 +167,61 @@ class EpisodeArchive:
 
     async def _flush_archive(self, scope: str, is_group: bool, group_id: Optional[str], user_id: Any):
         with self._buffer_lock:
+            if scope in self._flushing_scopes:
+                return
             buf = list(self._buffers.get(scope, []))
+            if not buf:
+                return
+            self._flushing_scopes.add(scope)
             self._buffers[scope] = []
             self._last_archive_time[scope] = time.time()
 
-        if not buf:
-            return
-
-        now = time.time()
-        # 1. 保存对话片段 (fact_type='episode')
-        chunk_lines = []
-        for e in buf:
-            chunk_lines.append(f"{e['name']}: {e['text']}")
-        episode_text = "\n".join(chunk_lines)
-
-        def save_episode(db):
-            db.execute("""
-                INSERT INTO memories (
-                    scope, text, created, ended, user_id, message_id, namespace,
-                    fact_type, category, target_id, target_name, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'episode', 'conversation', ?, ?, ?)
-            """, (
-                scope, episode_text, buf[0]["ts"], buf[-1]["ts"],
-                str(user_id) if user_id else None,
-                buf[-1].get("message_id"),
-                self._namespace,
-                str(group_id) if is_group else str(user_id),
-                f"群{group_id}" if is_group else "私聊",
-                now
-            ))
-
         try:
-            self._run_db(save_episode)
-        except Exception as exc:
-            self._warn("[MaiReply RAG] 保存历史片段失败: %s", exc)
+            now = time.time()
+            # 1. ?????? (fact_type='episode')
+            chunk_lines = []
+            for e in buf:
+                chunk_lines.append(f"{e['name']}: {e['text']}")
+            episode_text = "\n".join(chunk_lines).strip()
 
-        # 2. 异步调用 trigger_llm 执行 Mem0 原子事实抽取与状态机更新
-        try:
-            await self._extract_and_apply_mem0(scope, buf, is_group, group_id, user_id)
-        except Exception as exc:
-            self._warn("[MaiReply RAG] Mem0 抽取事实异常 (%s): %s", type(exc).__name__, exc)
+            if episode_text:
+                def save_episode(db):
+                    # ?????? scope ???? episode ???????????
+                    last_ep = db.execute("""
+                        SELECT text FROM memories
+                        WHERE scope=? AND fact_type='episode' AND namespace=?
+                        ORDER BY id DESC LIMIT 1
+                    """, (scope, self._namespace)).fetchone()
+                    if last_ep and (last_ep[0] or "").strip() == episode_text:
+                        return
+                    db.execute("""
+                        INSERT INTO memories (
+                            scope, text, created, ended, user_id, message_id, namespace,
+                            fact_type, category, target_id, target_name, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'episode', 'conversation', ?, ?, ?)
+                    """, (
+                        scope, episode_text, buf[0]["ts"], buf[-1]["ts"],
+                        str(user_id) if user_id else None,
+                        buf[-1].get("message_id"),
+                        self._namespace,
+                        str(group_id) if is_group else str(user_id),
+                        f"?{group_id}" if is_group else "??",
+                        now
+                    ))
+
+                try:
+                    self._run_db(save_episode)
+                except Exception as exc:
+                    self._warn("[MaiReply RAG] ????????: %s", exc)
+
+            # 2. ???? trigger_llm ?? Mem0 ????????????
+            try:
+                await self._extract_and_apply_mem0(scope, buf, is_group, group_id, user_id)
+            except Exception as exc:
+                self._warn("[MaiReply RAG] Mem0 ?????? (%s): %s", type(exc).__name__, exc)
+        finally:
+            with self._buffer_lock:
+                self._flushing_scopes.discard(scope)
 
     async def _extract_and_apply_mem0(self, scope: str, buf: List[Dict[str, Any]], is_group: bool, group_id: Optional[str], user_id: Any):
         facts = await self._extract_facts_llm(buf, is_group, group_id, user_id)
@@ -373,10 +393,9 @@ class EpisodeArchive:
         """, (self._namespace, limit)).fetchall()
 
     def _embedding_text(self, text: str, fact_type: str = "episode") -> str:
-        inst = str(self._embedding_cfg.get("query_instruction", "")).strip()
         if fact_type == "fact":
-            return f"事实记忆: {text}"
-        return f"{inst}: {text}" if inst else text
+            return f"????: {text}"
+        return text
 
     def _recent_events(self, db, scope: str, limit: int = 6):
         return db.execute("""

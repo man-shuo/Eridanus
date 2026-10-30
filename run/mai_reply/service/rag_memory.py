@@ -26,6 +26,13 @@ def trim_tokens(text: str, budget: int) -> str:
 
 
 class RAGMemory(EpisodeArchive, EpisodeRetrieval):
+    _instance = None
+    _initialized = False
+
+    def __new__(cls, config=None, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(RAGMemory, cls).__new__(cls)
+        return cls._instance
     """
     MaiReply 核心长期记忆系统 (Mem0 + RAG 架构)
     - 支持多范围隔离与跨会话贯通 (user:{id}, group:{id}, agent:global, private:{id})
@@ -35,6 +42,8 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
     """
 
     def __init__(self, config):
+        if self._initialized:
+            return
         self.cfg = dict(getattr(config.mai_reply, "rag", None) or {})
         self.enable = bool(self.cfg.get("enable", False))
         self._log_enabled = bool(self.cfg.get("logging", {}).get("enable", True))
@@ -100,6 +109,8 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
             self._provider,
             e.get("model", "默认"),
         )
+
+        self._initialized = True
 
     def _init_db_schema(self):
         """自动迁移表结构，兼容旧版本与 Mem0 扩展字段"""
@@ -186,6 +197,10 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
         if not texts:
             return []
         cfg = self._embedding_cfg
+        if is_query:
+            inst = str(cfg.get("query_instruction", "")).strip()
+            if inst:
+                texts = [f"{inst}: {t}" for t in texts]
         timeout = float(cfg.get("timeout_seconds", 15.0))
         if self._provider == "openai":
             base_url = str(cfg.get("base_url", "http://api.apollodorus.xyz/v1")).rstrip("/")
@@ -244,7 +259,7 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                 return vecs
 
     def _index_worker(self):
-        """后台异步向量化索引线程（支持归档防抖批量合并）"""
+        """????????????????????????????????"""
         batch_size = max(1, int(self.cfg.get("index", {}).get("batch_size", 16)))
         retry_seconds = max(5.0, float(self.cfg.get("index", {}).get("retry_seconds", 60.0)))
         while not self._closed:
@@ -258,33 +273,75 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                     time.sleep(2.0)
                     continue
 
-                # 防抖聚合：若队列中条目未满 batch_size，稍微等待 1.0 秒，
-                # 聚合同一归档周期内由 trigger_llm 抽取并写入的 Mem0 事实，合并为单次批量 Embedding 请求
+                # ???????????? batch_size????? 1.0 ?????
                 if len(pending) < batch_size:
                     time.sleep(1.0)
                     pending = self._run_db(self._pending, batch_size)
                     if not pending:
                         continue
 
-                texts = [self._embedding_text(r[1], r[3] if len(r) > 3 else "episode") for r in pending]
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    vecs = loop.run_until_complete(self._embed(texts))
-                finally:
-                    loop.close()
+                # 1. ?????
+                row_items = []
+                for r in pending:
+                    row_id = r[0]
+                    raw_text = r[1]
+                    ft = r[3] if len(r) > 3 else "episode"
+                    t = self._embedding_text(raw_text, ft)
+                    row_items.append((row_id, raw_text, ft, t))
 
-                def save(db):
-                    return db.executemany(
-                        "UPDATE memories SET vector=?, namespace=? WHERE id=?",
-                        [(v.tobytes(), self._namespace, r[0]) for r, v in zip(pending, vecs)]
-                    ).rowcount
+                # 2. ?????????????????????????? API ?????
+                text_to_vec: Dict[str, np.ndarray] = {}
+                def check_existing(db):
+                    found = {}
+                    for _, raw_text, _, t in row_items:
+                        if t in text_to_vec or t in found:
+                            continue
+                        row = db.execute(
+                            "SELECT vector FROM memories WHERE (text=? OR text=?) AND namespace=? AND vector IS NOT NULL LIMIT 1",
+                            (t, raw_text, self._namespace)
+                        ).fetchone()
+                        if row and row[0]:
+                            v = np.frombuffer(row[0], dtype=np.float32)
+                            found[t] = v
+                    return found
 
-                saved = self._run_db(save)
-                self._log("[MaiReply RAG] 成功向量化索引 %d 条记忆", saved)
+                existing_map = self._run_db(check_existing)
+                text_to_vec.update(existing_map)
+
+                # 3. ??????????????????????? Embedding
+                unembedded_unique = []
+                for _, _, _, t in row_items:
+                    if t not in text_to_vec and t not in unembedded_unique:
+                        unembedded_unique.append(t)
+
+                if unembedded_unique:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        new_vecs = loop.run_until_complete(self._embed(unembedded_unique, is_query=False))
+                    finally:
+                        loop.close()
+                    for t, v in zip(unembedded_unique, new_vecs):
+                        text_to_vec[t] = v
+
+                # 4. ???????????
+                updates = []
+                for row_id, _, _, t in row_items:
+                    vec = text_to_vec.get(t)
+                    if vec is not None:
+                        updates.append((vec.tobytes(), self._namespace, row_id))
+
+                if updates:
+                    def save(db):
+                        return db.executemany(
+                            "UPDATE memories SET vector=?, namespace=? WHERE id=?",
+                            updates
+                        ).rowcount
+                    saved = self._run_db(save)
+                    self._log("[MaiReply RAG] ??????? %d ??? (API??=%d, ??=%d)", saved, len(unembedded_unique), len(updates) - len(unembedded_unique))
             except Exception as exc:
                 self._cooldown = time.monotonic() + retry_seconds
-                self._warn("[MaiReply RAG] 向量化索引发生异常 (%s)，冷却等待 %.0fs", type(exc).__name__, retry_seconds)
+                self._warn("[MaiReply RAG] ????????? (%s)????? %.0fs: %s", type(exc).__name__, retry_seconds, exc)
                 time.sleep(2.0)
 
     def start(self):

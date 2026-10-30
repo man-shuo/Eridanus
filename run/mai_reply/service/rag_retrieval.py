@@ -106,12 +106,25 @@ class EpisodeRetrieval:
         if not query_text:
             return ""
 
-        try:
-            vectors = await asyncio.wait_for(self._embed([query_text], is_query=True), timeout=timeout)
-            q_vec = vectors[0]
-        except Exception as exc:
-            self._warn(f"[MaiReply RAG] 生成 Query Embedding 超时或失败: {exc}")
-            return ""
+        cache_ttl = float(cfg.get("query_cache_seconds", 300.0))
+        max_cache_size = int(cfg.get("query_cache_size", 256))
+        q_vec = None
+
+        cached = self._query_cache.get(query_text)
+        if cached and (now - cached[0]) < cache_ttl:
+            q_vec = cached[1]
+
+        if q_vec is None:
+            try:
+                vectors = await asyncio.wait_for(self._embed([query_text], is_query=True), timeout=timeout)
+                q_vec = vectors[0]
+                if len(self._query_cache) >= max_cache_size:
+                    oldest_k = min(self._query_cache.keys(), key=lambda k: self._query_cache[k][0])
+                    self._query_cache.pop(oldest_k, None)
+                self._query_cache[query_text] = (now, q_vec)
+            except Exception as exc:
+                self._warn(f"[MaiReply RAG] ?? Query Embedding ?????: {exc}")
+                return ""
 
         # -------------------------------------------------------------
         # 3. 从数据库读取候选记忆（包含群内多人及本群记忆）
