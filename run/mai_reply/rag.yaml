@@ -12,10 +12,10 @@ group:
 embedding:
   provider: cloudflare  # cloudflare: Workers AI；openai: 8099/Kaggle 等兼容接口
   # 以下同层参数仅用于 openai provider。
-  base_url: http://localhost:8099/v1
+  base_url: http://api.apollodorus.xyz/v1
   endpoint: embeddings
   model: qwen3-embedding-4b
-  api_key: endlesswork
+  api_key: ''
   api_key_env: MAI_RAG_API_KEY  # 设置时优先于 api_key
   timeout_seconds: 12
   dimensions: ''  # 模型默认维度；切换模型/维度时自动重新索引
