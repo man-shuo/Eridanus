@@ -19,15 +19,8 @@ logger = get_logger(__name__)
 FACT_EXTRACT_SYSTEM_PROMPT = """你是一个高效、客观的长期记忆提取与状态机分析专家（参考 Mem0 架构）。
 你的任务是从给定的最新对话片段中，提取出需要长期记住的关键原子事实（Facts），并判断每个事实的操作类型（ADD / UPDATE / DELETE）。
 
-【特别强调：群聊多人环境感知】
-群聊是多人互动的群体环境。对话中通常有多位群成员同时在场发言：
-1. 必须根据每条消息中的发件人标识（[姓名 (ID:xxx)]）准确区分不同群成员，绝对不能把 A 说的话或 A 的特征张冠李戴给 B！
-2. 分别为发言的具体群成员抽取各自的客观事实（target_type: "user", target_id: 该成员的具体ID, target_name: 该成员的昵称），让Bot在群里能够分别认得并记住每一位群友。
-3. 涉及全群性质的社群文化、共同话题、群规禁忌、经典梗时，才归为群集体事实（target_type: "group", target_id: 群号）。
-4. 涉及Bot自身独立经历或设定的，归为Bot自我事实（target_type: "bot", target_id: "global"）。
-
 请提取三类实体的客观事实：
-1. user: 某具体群友/用户的长期背景、职业/学业、稳定作息习惯、重要喜好/雷区、当前重大现实事件、群内角色定位等。
+1. user: 用户的长期个人背景、稳定作息习惯、重要喜好/雷区、当前重大现实事件/人生节点、重要人际关系等。
 2. group: 本群特有的社群定位、群专属黑话/梗文化、共同话题、重大集体事件。
 3. bot: Bot自身经历的真实独立事件、明确认同的个性/习惯设定、收到的关键契约或重大生活足迹。
 
@@ -40,10 +33,10 @@ FACT_EXTRACT_SYSTEM_PROMPT = """你是一个高效、客观的长期记忆提取
 严格返回一个标准的 JSON 数组，数组中每个对象包含以下字段：
 - "action": "ADD" | "UPDATE" | "DELETE"
 - "target_type": "user" | "bot" | "group"
-- "target_id": 实体的唯一标识（该群友的QQ号/ID，群号，若是Bot自身则固定为 "global"）
-- "target_name": 实体名称（群友昵称、群名称，或Bot名字）
+- "target_id": 实体的唯一标识（用户的QQ号/ID，群号，若是Bot自身则固定为 "global"）
+- "target_name": 实体名称（用户昵称、群名称，或Bot名字）
 - "category": 事实分类，如 "profile"（档案）, "preference"（喜好偏好）, "habit"（习惯作息）, "plan"（近期计划）, "milestone"（重大事件/经历）, "relationship"（人际契约）
-- "content": 精炼准确的客观事实陈述（必须简明扼要，建议20-60字，禁止废话，不要第一人称口语），如 "阿强是本群管理员，近期在准备计算机考研。"
+- "content": 精炼准确的客观事实陈述（必须简明扼要，建议20-60字，禁止废话，不要第一人称口语），如 "用户在莫斯科留学读政治学，正处于毕业设计高压期。"
 
 若对话片段完全为闲聊吹水、无任何值得长期沉淀的事实价值，请返回空数组 []。直接输出 JSON，不要 Markdown 包装或解释。"""
 
@@ -62,10 +55,26 @@ class EpisodeArchive:
         trig_cfg = ccfg.get("trigger_llm", {}) or {}
         self._trig_model = str(trig_cfg.get("model", "")).strip() or "qwen3.8-flash"
         self._trig_base_url = str(trig_cfg.get("base_url", "")).strip().rstrip("/") or "http://api.apollodorus.xyz/v1"
-        self._trig_keys = trig_cfg.get("api_keys", [])
-        if isinstance(self._trig_keys, str):
-            self._trig_keys = [self._trig_keys]
-        self._trig_keys = [k for k in self._trig_keys if k]
+        raw_key = trig_cfg.get("api_key")
+        raw_keys = trig_cfg.get("api_keys", [])
+        keys = []
+        if raw_key and str(raw_key).strip():
+            keys.append(str(raw_key).strip())
+        if isinstance(raw_keys, list):
+            keys.extend([str(k).strip() for k in raw_keys if k and str(k).strip()])
+        elif isinstance(raw_keys, str) and raw_keys.strip():
+            keys.append(raw_keys.strip())
+
+        # 若 trigger_llm 未单独配置 key，回退到主回复模型 openai.api_keys
+        if not keys:
+            llm_openai = ccfg.get("llm", {}).get("openai", {})
+            main_keys = llm_openai.get("api_keys", [])
+            if isinstance(main_keys, list):
+                keys.extend([str(k).strip() for k in main_keys if k and str(k).strip()])
+            elif isinstance(main_keys, str) and main_keys.strip():
+                keys.append(main_keys.strip())
+
+        self._trig_keys = keys
 
     def _event(self, speaker_name: str, speaker_id: str, text: str, is_bot: bool, ts: float, message_id: Optional[str] = None) -> Dict[str, Any]:
         return {
@@ -246,22 +255,12 @@ class EpisodeArchive:
             "max_tokens": 800
         }
 
-        content = ""
-        for attempt in range(2):
-            try:
-                async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
-                    resp = await client.post(url, headers=headers, json=payload)
-                    if resp.status_code == 200:
-                        content = resp.json()["choices"][0]["message"]["content"].strip()
-                        break
-                    else:
-                        self._warn(f"[MaiReply RAG] trigger_llm 请求失败 HTTP {resp.status_code} (尝试 {attempt+1}/2)")
-            except Exception as exc:
-                self._warn(f"[MaiReply RAG] trigger_llm 网络异常 ({type(exc).__name__}) (尝试 {attempt+1}/2): {exc}")
-                if attempt == 0:
-                    await asyncio.sleep(2.0)
-        if not content:
-            return []
+        async with httpx.AsyncClient(timeout=25.0, trust_env=False) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                self._warn(f"[MaiReply RAG] trigger_llm 请求失败 HTTP {resp.status_code}: {resp.text[:200]}")
+                return []
+            content = resp.json()["choices"][0]["message"]["content"].strip()
 
         # 解析 JSON
         clean_json = re.sub(r"^```(?:json)?\s*", "", content, flags=re.MULTILINE)

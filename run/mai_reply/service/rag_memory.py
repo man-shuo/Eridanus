@@ -133,6 +133,8 @@ class RAGMemory(EpisodeArchive, EpisodeRetrieval):
                 ("target_name", "TEXT"),
                 ("updated_at", "REAL"),
                 ("ended", "REAL"),
+                ("user_id", "TEXT"),
+                ("message_id", "TEXT"),
                 ("participants", "TEXT"),
             ]
             for col_name, col_def in needed_cols:
