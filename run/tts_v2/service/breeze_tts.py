@@ -80,8 +80,8 @@ ALL_BREEZE_TAG_NAMES = {
 }
 
 DEFAULT_GATEWAY_URL = "http://api.apollodorus.xyz"
-DEFAULT_DIRECT_URL = "http://apollodorus.xyz:3529"
-DEFAULT_API_KEY = "sk-c3d93a94f5994a2e8d6a728cd1b1f018f657eae388feb76b"
+DEFAULT_DIRECT_URL = ""
+DEFAULT_API_KEY = ""
 
 
 def is_wav(data: bytes) -> bool:
