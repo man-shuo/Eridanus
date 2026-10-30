@@ -1,4 +1,5 @@
-"""Scoped conversation episodes, provider adapters and quota-conscious retrieval."""
+# -*- coding: utf-8 -*-
+"""Scoped conversation episodes, provider adapters, Mem0 integration and quota-conscious retrieval."""
 import asyncio
 import hashlib
 import json
@@ -7,7 +8,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from urllib.parse import quote
+from typing import List, Dict, Optional, Tuple, Any
 
 import httpx
 import numpy as np
@@ -18,181 +19,296 @@ from run.mai_reply.service.rag_retrieval import EpisodeRetrieval, RAG_PREFIX
 
 logger = get_logger(__name__)
 
-def trim_tokens(text, budget):
+
+def trim_tokens(text: str, budget: int) -> str:
     """UTF-8 byte length upper-bounds tokens for the supported byte tokenizers."""
     return text.encode("utf-8")[:max(0, budget)].decode("utf-8", errors="ignore")
 
+
 class RAGMemory(EpisodeArchive, EpisodeRetrieval):
+    """
+    MaiReply 核心长期记忆系统 (Mem0 + RAG 架构)
+    - 支持多范围隔离与跨会话贯通 (user:{id}, group:{id}, agent:global, private:{id})
+    - 结合 LLM 原子事实抽取 (ADD / UPDATE / DELETE 状态机) 与历史片段归档
+    - 兼容本地与远程 OpenAI 格式 Embedding 服务 (如 qwen3-embedding-4b)
+    - 数据库自动拓展与热迁移
+    """
+
     def __init__(self, config):
         self.cfg = dict(getattr(config.mai_reply, "rag", None) or {})
         self.enable = bool(self.cfg.get("enable", False))
         self._log_enabled = bool(self.cfg.get("logging", {}).get("enable", True))
         self._lock = threading.RLock()
-        self._db = None
-        self._worker = None
-        self._client = None
+        self._db: Optional[sqlite3.Connection] = None
+        self._worker: Optional[threading.Thread] = None
+        self._client: Optional[httpx.Client] = None
         self._closed = False
         self._cooldown = 0.0
         self._generation = 0
+
         self._init_retrieval()
         self._init_archive(config)
+
         self._embedding_cfg = self.cfg.get("embedding", {})
         e = self._embedding_cfg
         self._provider = str(e.get("provider", "openai")).strip().lower()
         self._cloudflare_cfg = e.get("cloudflare", {})
-        # Preserve OpenAI namespaces and isolate vectors from other providers.
-        identity = [e.get("base_url"), e.get("endpoint", "embeddings"), e.get("model"), e.get("dimensions")]
+
+        # 命名空间隔离：基于模型、维度、端点哈希
+        identity = [
+            self._provider,
+            e.get("base_url"),
+            e.get("endpoint", "embeddings"),
+            e.get("model"),
+            e.get("dimensions"),
+        ]
         if self._provider != "openai":
             cf = self._cloudflare_cfg
             identity = [self._provider, cf.get("account_id"), cf.get("model", "@cf/baai/bge-m3")]
-        self._namespace = hashlib.sha256(json.dumps(
-            identity
-        ).encode()).hexdigest()
+        self._namespace = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
         if self.enable:
             try:
-                path = Path(self.cfg.get("db_path", "data/dataBase/mai_rag_memory.db"))
-                path.parent.mkdir(parents=True, exist_ok=True)
-                self._db = sqlite3.connect(str(path), check_same_thread=False, timeout=5)
+                self._db_path = Path(self.cfg.get("db_path", "data/dataBase/mai_rag_memory.db"))
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                self._db = sqlite3.connect(
+                    str(self._db_path),
+                    check_same_thread=False,
+                    timeout=30.0,
+                    isolation_level=None
+                )
                 self._db.execute("PRAGMA journal_mode=WAL")
-                self._db.execute("""CREATE TABLE IF NOT EXISTS memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, user_id TEXT NOT NULL,
-                    source TEXT NOT NULL, text TEXT NOT NULL, created REAL NOT NULL,
-                    vector BLOB, namespace TEXT, UNIQUE(scope, source))""")
-                self._db.execute("CREATE INDEX IF NOT EXISTS rag_scope ON memories(scope, created)")
-                self._db.commit()
-                self._init_archive(config)
+                self._db.execute("PRAGMA synchronous=NORMAL")
+                
+                # 初始化或迁移表结构
+                self._init_db_schema()
+
+                self.start()
             except Exception as exc:
-                logger.error("[MaiReply RAG] 数据库初始化失败 (%s)，本次启动关闭 RAG", type(exc).__name__)
-                if self._db:
-                    self._db.close()
-                self._db = None
                 self.enable = False
-        if self.enable:
-            group = self.cfg.get("group", {})
-            group_policy = ("关闭" if not group.get("enable", True) else
-                            f"白名单 {len(group.get('whitelist', []))} 个群" if group.get("whitelist_enabled", True) else "所有群")
-            self._log("[MaiReply RAG] 已启用 provider=%s 私聊=%s 群聊=%s 旁观=%s；私聊每%s轮/群聊每%s条用户消息归档，空闲%s秒补归档",
-                      self._provider, self.allowed(), group_policy, group.get("observe_untriggered", True),
-                      self._archive_cfg['private_turns'], self._archive_cfg['group_messages'],
-                      self._archive_cfg.get('idle_seconds', 600))
-            if self._provider == "cloudflare":
-                cf = self._cloudflare_cfg
-                missing = []
-                if not cf.get("account_id"):
-                    missing.append("account_id")
-                if not (os.environ.get(cf.get("api_token_env", "CLOUDFLARE_API_TOKEN")) or cf.get("api_token")):
-                    missing.append("api_token/环境变量")
-                if missing:
-                    logger.warning("[MaiReply RAG] Cloudflare 配置不完整：缺少 %s；请补齐后重启 Bot", ", ".join(missing))
-        else:
-            self._log("[MaiReply RAG] 未启用 (enable=false)，沿用原有聊天和记忆流程")
+                logger.error("[MaiReply RAG] 数据库初始化失败 (%s)，已禁用 RAG", type(exc).__name__, exc_info=True)
 
-    def _log(self, message, *args):
+        group = self.cfg.get("group", {})
+        logger.info(
+            "[MaiReply RAG] 就绪 | 状态=%s | 模式=%s | 库=%s | 私聊=%s | 群聊=%s | 模型=%s/%s",
+            "启用" if self.enable else "禁用",
+            self.cfg.get("integration_mode", "replace"),
+            self.cfg.get("db_path", "(内存)"),
+            "开启" if self.cfg.get("private", {}).get("enable", True) else "关闭",
+            ("白名单(%d个)" % len(group.get("whitelist", []))
+             if group.get("whitelist_enabled", True) else "全开"),
+            self._provider,
+            e.get("model", "默认"),
+        )
+
+    def _init_db_schema(self):
+        """自动迁移表结构，兼容旧版本与 Mem0 扩展字段"""
+        with self._lock:
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    vector BLOB,
+                    created REAL NOT NULL,
+                    ended REAL,
+                    user_id TEXT,
+                    message_id TEXT,
+                    namespace TEXT NOT NULL,
+                    fact_type TEXT DEFAULT 'episode',
+                    category TEXT DEFAULT 'conversation',
+                    target_id TEXT,
+                    target_name TEXT,
+                    updated_at REAL,
+                    participants TEXT
+                )
+            """)
+            # 检查已有表的字段并进行自动补全拓展
+            cursor = self._db.execute("PRAGMA table_info(memories)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            needed_cols = [
+                ("fact_type", "TEXT DEFAULT 'episode'"),
+                ("category", "TEXT DEFAULT 'conversation'"),
+                ("target_id", "TEXT"),
+                ("target_name", "TEXT"),
+                ("updated_at", "REAL"),
+                ("ended", "REAL"),
+                ("participants", "TEXT"),
+            ]
+            for col_name, col_def in needed_cols:
+                if col_name not in existing_cols:
+                    try:
+                        self._db.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
+                    except Exception as e:
+                        logger.warning(f"[MaiReply RAG] ALTER TABLE 添加列 {col_name} 警告: {e}")
+
+            self._db.execute("CREATE INDEX IF NOT EXISTS idx_memories_scope_ns ON memories (scope, namespace)")
+            self._db.execute("CREATE INDEX IF NOT EXISTS idx_memories_ns_time ON memories (namespace, COALESCE(ended, created))")
+            self._db.execute("CREATE INDEX IF NOT EXISTS idx_memories_target ON memories (target_id, fact_type)")
+
+    def _log(self, msg: str, *args):
         if self._log_enabled:
-            logger.info(message, *args)
+            logger.info(msg, *args)
 
-    def _warn(self, message, exc):
-        logger.warning("[MaiReply RAG] %s (%s)", message, type(exc).__name__)
+    def _warn(self, msg: str, *args):
+        logger.warning(msg, *args)
 
-    @staticmethod
-    def scope_for(group_id, user_id):
+    def scope_for(self, group_id: Optional[str], user_id: Any) -> str:
         return f"group:{group_id}" if group_id is not None else f"private:{user_id}"
 
     @property
-    def replaces_legacy(self):
-        return self.enable and self.cfg.get("integration_mode", "replace") == "replace"
+    def replaces_legacy(self) -> bool:
+        mode = str(self.cfg.get("integration_mode", "replace")).strip().lower()
+        return mode == "replace"
 
-    def allowed(self, group_id=None):
-        if not self.enable or self._closed:
+    def allowed(self, group_id: Optional[str]) -> bool:
+        if not self.enable:
             return False
         if group_id is None:
             return bool(self.cfg.get("private", {}).get("enable", True))
-        cfg = self.cfg.get("group", {})
-        return bool(cfg.get("enable", True)) and (
-            not cfg.get("whitelist_enabled", True)
-            or str(group_id) in {str(x) for x in cfg.get("whitelist", [])}
-        )
+        gcfg = self.cfg.get("group", {})
+        if not gcfg.get("enable", True):
+            return False
+        if not gcfg.get("whitelist_enabled", True):
+            return True
+        wl = [str(x) for x in gcfg.get("whitelist", [])]
+        return str(group_id) in wl
 
-    def _run_db(self, fn, *args):
+    def _run_db(self, fn, *args, **kwargs):
         with self._lock:
             if self._db is None:
-                return None
-            with self._db:
-                return fn(self._db, *args)
+                raise RuntimeError("Database connection closed")
+            return fn(self._db, *args, **kwargs)
 
-    async def _embed(self, texts, query=False):
-        e = self._embedding_cfg
-        if self._provider not in ("openai", "cloudflare"):
-            raise ValueError("unsupported embedding provider")
-        cf = self._cloudflare_cfg
-        settings = cf if self._provider == "cloudflare" else e
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(trust_env=False, timeout=float(
-                settings.get("timeout_seconds", e.get("timeout_seconds", 12))))
-        values = texts
-        # Qwen instructions must not leak into BGE-M3 requests.
-        instruction = settings.get("query_instruction", "")
-        if query and instruction:
-            values = [f"Instruct: {instruction}\nQuery: {s}" for s in texts]
-        if self._provider == "cloudflare":
-            account_id = str(cf.get("account_id", "")).strip()
-            model = str(cf.get("model", "@cf/baai/bge-m3")).strip()
-            if not account_id or not model.startswith(("@cf/", "@hf/")):
-                raise ValueError("cloudflare account_id/model not configured")
-            key = os.environ.get(cf.get("api_token_env", "CLOUDFLARE_API_TOKEN")) or cf.get("api_token", "")
-            if not key:
-                raise ValueError("cloudflare api_token not configured")
-            url = ("https://api.cloudflare.com/client/v4/accounts/" + quote(account_id, safe="")
-                   + "/ai/run/" + quote(model, safe="@/"))
-            payload = {"text": values}
+    async def _embed(self, texts: List[str], is_query: bool = False) -> List[np.ndarray]:
+        if not texts:
+            return []
+        cfg = self._embedding_cfg
+        timeout = float(cfg.get("timeout_seconds", 15.0))
+        if self._provider == "openai":
+            base_url = str(cfg.get("base_url", "http://api.apollodorus.xyz/v1")).rstrip("/")
+            endpoint = str(cfg.get("endpoint", "embeddings")).strip("/")
+            url = f"{base_url}/{endpoint}"
+            model = str(cfg.get("model", "qwen3-embedding-4b")).strip()
+            api_key = str(cfg.get("api_key", "")).strip()
+            env_name = str(cfg.get("api_key_env", "MAI_RAG_API_KEY")).strip()
+            if not api_key and env_name:
+                api_key = os.environ.get(env_name, "")
+
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            payload = {"model": model, "input": texts}
+
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Embedding API HTTP {resp.status_code}: {resp.text[:300]}")
+                data = resp.json()
+                items = sorted(data.get("data", []), key=lambda x: x.get("index", 0))
+                vecs = []
+                for it in items:
+                    v = np.array(it.get("embedding", []), dtype=np.float32)
+                    norm = np.linalg.norm(v)
+                    if norm > 1e-12:
+                        v = v / norm
+                    vecs.append(v)
+                if len(vecs) != len(texts):
+                    raise RuntimeError(f"Expected {len(texts)} embeddings, got {len(vecs)}")
+                return vecs
         else:
-            key = os.environ.get(e.get("api_key_env", "MAI_RAG_API_KEY")) or e.get("api_key", "")
-            payload = {"model": e.get("model", "qwen3-embedding-4b"), "input": values, "encoding_format": "float"}
-            if e.get("dimensions") not in (None, ""):
-                payload["dimensions"] = int(e["dimensions"])
-            url = e.get("base_url", "http://localhost:8099/v1").rstrip("/") + "/" + e.get("endpoint", "embeddings").lstrip("/")
-        response = await self._client.post(url, json=payload, headers={"Authorization": f"Bearer {key}"})
-        # Never log response bodies, which can contain keys, names or message text.
-        if response.status_code != 200:
-            raise RuntimeError(f"embedding HTTP {response.status_code}")
-        body = response.json()
-        if self._provider == "cloudflare":
-            if body.get("success") is not True or body.get("errors"):
-                raise RuntimeError("cloudflare embedding request failed")
-            result = body.get("result") or {}
-            data = result.get("data", [])
-            if not isinstance(data, list):
-                raise ValueError("invalid cloudflare embedding data")
-            rows = [{"index": i, "embedding": vector} for i, vector in enumerate(data)]
-            shape = result.get("shape")
-            if shape is not None and (len(shape) != 2 or shape[0] != len(texts)
-                                      or any(not isinstance(v, list) or len(v) != shape[1] for v in data)):
-                raise ValueError("cloudflare embedding shape mismatch")
-        else:
-            rows = body.get("data", [])
-        if len(rows) != len(texts) or sorted(r["index"] for r in rows) != list(range(len(texts))):
-            raise ValueError("embedding count/index mismatch")
-        vectors = []
-        for row in sorted(rows, key=lambda r: r["index"]):
-            v = np.asarray(row["embedding"], dtype=np.float32)
-            if v.ndim != 1 or not v.size or not np.isfinite(v).all() or np.linalg.norm(v) == 0:
-                raise ValueError("invalid embedding vector")
-            vectors.append(v / np.linalg.norm(v))
-        if len({v.size for v in vectors}) != 1:
-            raise ValueError("inconsistent embedding dimensions")
-        return vectors
+            # Cloudflare Workers AI 保底
+            account_id = str(self._cloudflare_cfg.get("account_id", "")).strip()
+            model = str(self._cloudflare_cfg.get("model", "@cf/baai/bge-m3")).strip()
+            token = str(self._cloudflare_cfg.get("api_token", "")).strip()
+            env_name = str(self._cloudflare_cfg.get("api_token_env", "CLOUDFLARE_API_TOKEN")).strip()
+            if not token and env_name:
+                token = os.environ.get(env_name, "")
+            url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json={"text": texts})
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Cloudflare AI HTTP {resp.status_code}: {resp.text[:200]}")
+                data = resp.json().get("result", {}).get("data", [])
+                vecs = []
+                for row in data:
+                    v = np.array(row, dtype=np.float32)
+                    norm = np.linalg.norm(v)
+                    if norm > 1e-12:
+                        v = v / norm
+                    vecs.append(v)
+                return vecs
+
+    def _index_worker(self):
+        """后台异步向量化索引工作线程"""
+        batch_size = max(1, int(self.cfg.get("index", {}).get("batch_size", 16)))
+        retry_seconds = max(5.0, float(self.cfg.get("index", {}).get("retry_seconds", 60.0)))
+        while not self._closed:
+            try:
+                if self._cooldown > time.monotonic():
+                    time.sleep(1.0)
+                    continue
+
+                pending = self._run_db(self._pending, batch_size)
+                if not pending:
+                    time.sleep(2.0)
+                    continue
+
+                texts = [self._embedding_text(r[1], r[3] if len(r) > 3 else "episode") for r in pending]
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    vecs = loop.run_until_complete(self._embed(texts))
+                finally:
+                    loop.close()
+
+                def save(db):
+                    return db.executemany(
+                        "UPDATE memories SET vector=?, namespace=? WHERE id=?",
+                        [(v.tobytes(), self._namespace, r[0]) for r, v in zip(pending, vecs)]
+                    ).rowcount
+
+                saved = self._run_db(save)
+                self._log("[MaiReply RAG] 成功向量化索引 %d 条记忆", saved)
+            except Exception as exc:
+                self._cooldown = time.monotonic() + retry_seconds
+                self._warn("[MaiReply RAG] 向量化索引出错 (%s)，进入冷却 %.0fs", type(exc).__name__, retry_seconds)
+                time.sleep(2.0)
+
+    def start(self):
+        if self._worker is None and self.enable:
+            self._worker = threading.Thread(target=self._index_worker, name="rag_index_worker", daemon=True)
+            self._worker.start()
+
+    def close(self):
+        self._closed = True
+        with self._lock:
+            if self._db is not None:
+                try:
+                    self._db.close()
+                except Exception:
+                    pass
+                self._db = None
 
     async def aclose(self):
-        self._closed = True
-        if self._worker and not self._worker.done():
-            self._worker.cancel()
-            try:
-                await self._worker
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        with self._lock:
-            if self._db:
-                self._db.close()
-                self._db = None
+        self.close()
+
+    async def wait_indexing(self, timeout: float = 30.0) -> bool:
+        """等待所有待索引的记忆完成向量化入库"""
+        start_t = time.time()
+        while time.time() - start_t < timeout:
+            pending = self._run_db(lambda db: db.execute(
+                "SELECT COUNT(*) FROM memories WHERE vector IS NULL AND namespace=?",
+                (self._namespace,)
+            ).fetchone()[0])
+            if pending == 0:
+                return True
+            await asyncio.sleep(0.5)
+        return False
+
+    async def recall(self, group_id: Optional[str], user_id: Any, query: str, recent_context=None, now=None) -> str:
+        if not self.allowed(group_id):
+            return ""
+        return await self._recall(group_id, user_id, query, recent_context=recent_context, now=now)

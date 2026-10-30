@@ -54,8 +54,10 @@ BREEZE_AUDIO_TAGS_ZH: Dict[str, Dict[str, str]] = {
         "[吸鼻子]": "受凉或难过吸鼻涕 (sniffle)",
     },
     "嘴部动作 (Mouth sounds)": {
-        "[吧唧嘴]": "吧唧嘴唇声 (lip smack)",
-        "[啧啧嘴]": "啧舌/咂嘴声 (click tongue)",
+        "[咂嘴]": "咂嘴/轻咂嘴唇 (lip smack)",
+        "[啧嘴]": "啧嘴/咂舌 (click tongue)",
+        "[吧唧嘴]": "吧唧嘴 (lip smack 兼容)",
+        "[啧啧嘴]": "啧舌 (click tongue 兼容)",
     },
     "生理反射 (Body reflexes)": {
         "[打哈欠]": "困倦打哈欠 (yawn)",
@@ -442,6 +444,15 @@ class AsyncBreezeTTSClient:
         return self._cfg.get("default_instruction", "说话轻柔温和，略带自然真实的情感。")
 
     @property
+    def base_tone(self) -> str:
+        """从配置文件读取角色固有性格与声音基调，若未配置则回退到 default_instruction"""
+        return str(
+            self._cfg.get("base_tone")
+            or self._cfg.get("instruction_base_tone")
+            or self.default_instruction
+        ).strip()
+
+    @property
     def default_cfg_scale(self) -> float:
         try:
             return float(self._cfg.get("cfg_scale", 4.0))
@@ -500,23 +511,25 @@ class AsyncBreezeTTSClient:
         except Exception as e:
             logger.debug(f"[BreezeTTS] 读取 trigger_llm 配置异常: {e}")
 
+        base_tone = self.base_tone
         prompt = (
             "你是一个专业的AI语音合成配音导演与台词指导。\n"
-            "请为待合成文本生成简练生动的配音语气指导语 (instruction)，"
-            "并视语境在台词适当位置添加0~2个中文音频表现力标签 (tagged_text)。\n\n"
-            "【可用中文音频表现力标签】\n"
+            f"当前角色的固有性格与声音基调为：【{base_tone}】。\n"
+            "请在保持这一基础声音基调与人设风格的前提下，结合具体的台词语境与情绪起伏，为待合成文本生成简练生动的配音语气指导语 (instruction)，"
+            "并根据语境在台词合适位置插入0~2个合法的音频表现力标签 (tagged_text)。\n\n"
+            "【可用中文音频表现力标签）】\n"
             "- 笑声：[笑]、[轻笑]、[咯咯笑]\n"
-            "- 哭泣：[哭声]、[抽泣]、[呜咽]、[呻吟]、[哀号]\n"
-            "- 呼吸：[叹气]、[惊呼]、[吸气]、[呼气]、[喘息]\n"
-            "- 语气：[耳语]、[喊叫]、[惨叫]、[唱歌]、[哼歌]、[结巴]、[停顿]\n"
-            "- 喉鼻：[清嗓]、[咳嗽]、[吸鼻子]\n"
-            "- 嘴部：[吧唧嘴]、[啧啧嘴]\n"
-            "- 生理：[打哈欠]、[打喷嚏]、[打嗝]、[打饱嗝]、[吞咽]、[干呕]\n"
-            "- 反应：[闷哼]、[冷笑]、[哼鼻子]\n\n"
-            "【输出要求】\n"
-            "1. 必须输出标准 JSON 对象，包含且仅包含两个字段：\"instruction\" 与 \"tagged_text\"。\n"
-            "2. \"instruction\"：15字以内简练传神的配音语气指导（例如：\"说话轻柔温和，略带怀念与感伤\"、\"略带娇嗔与幽怨\"、\"语气欢快，带着俏皮的笑意\"）。\n"
-            "3. \"tagged_text\"：在原台词最恰当位置插入0~2个上述中文方括号标签（严禁使用英文标签如 [pause]，只能使用上述官方中文标签！）。切勿随意篡改原台词核心字句，若不适合加标签则保持原台词。\n"
+            "- 哭泣与痛苦：[哭声]、[抽泣]、[呜咽]、[呻吟]、[哀号]\n"
+            "- 呼吸与叹息：[叹气]、[惊呼]、[吸气]、[呼气]、[喘息]\n"
+            "- 语气与腔调：[耳语]、[喊叫]、[惨叫]、[唱歌]、[哼歌]、[结巴]、[停顿]\n"
+            "- 咽喉与鼻腔 ：[清嗓]、[咳嗽]、[吸鼻子]\n"
+            "- 嘴部动作：[咂嘴]、[啧嘴]\n"
+            "- 生理反射 ：[打哈欠]、[打喷嚏]、[打嗝]、[打饱嗝]、[吞咽]、[干呕]\n"
+            "- 情绪反应 ：[闷哼]、[冷笑]、[哼鼻子]\n\n"
+            "生成要求：\n"
+            "1. 必须输出标准 JSON 对象，包含且仅包含两个字段：\"instruction\" 和 \"tagged_text\"。\n"
+            f"2. \"instruction\"：15字以内简练生动的配音指导语。必须符合角色的固有基调【{base_tone}】，在此基调上体现当前句子的细微情绪波动（例如在基调基础上体现略带撒娇、疑惑、欣慰等细微变化）。\n"
+            "3. \"tagged_text\"：在原台词的恰当位置插入0~2个上述官方列出的合法音频标签（只能使用上方列出的官方标签，严禁自行臆造标签如 [大笑]、[微笑] 或使用英文标签），不得大幅修改原台词词句，若不适合加标签则保持原台词。\n"
             f"待合成文本：\"{text}\"\n"
             "请直接输出标准 JSON 格式：{\"instruction\": \"...\", \"tagged_text\": \"...\"}"
         )

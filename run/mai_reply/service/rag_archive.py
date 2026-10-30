@@ -1,295 +1,365 @@
-"""Durable conversational buffering and threshold/idle-based episode indexing."""
+# -*- coding: utf-8 -*-
+"""Episodic memory buffering, Mem0 atomic fact extraction, and background consolidation."""
 import asyncio
+import hashlib
 import json
+import os
+import re
+import threading
 import time
-import uuid
-from datetime import datetime
+from typing import List, Dict, Optional, Tuple, Any
 
-from run.mai_reply.service.rag_query import topic_labels
+import httpx
+import numpy as np
+
+from framework_common.utils.system_logger import get_logger
+
+logger = get_logger(__name__)
+
+FACT_EXTRACT_SYSTEM_PROMPT = """你是一个高效、客观的长期记忆提取与状态机分析专家（参考 Mem0 架构）。
+你的任务是从给定的最新对话片段中，提取出需要长期记住的关键原子事实（Facts），并判断每个事实的操作类型（ADD / UPDATE / DELETE）。
+
+【特别强调：群聊多人环境感知】
+群聊是多人互动的群体环境。对话中通常有多位群成员同时在场发言：
+1. 必须根据每条消息中的发件人标识（[姓名 (ID:xxx)]）准确区分不同群成员，绝对不能把 A 说的话或 A 的特征张冠李戴给 B！
+2. 分别为发言的具体群成员抽取各自的客观事实（target_type: "user", target_id: 该成员的具体ID, target_name: 该成员的昵称），让Bot在群里能够分别认得并记住每一位群友。
+3. 涉及全群性质的社群文化、共同话题、群规禁忌、经典梗时，才归为群集体事实（target_type: "group", target_id: 群号）。
+4. 涉及Bot自身独立经历或设定的，归为Bot自我事实（target_type: "bot", target_id: "global"）。
+
+请提取三类实体的客观事实：
+1. user: 某具体群友/用户的长期背景、职业/学业、稳定作息习惯、重要喜好/雷区、当前重大现实事件、群内角色定位等。
+2. group: 本群特有的社群定位、群专属黑话/梗文化、共同话题、重大集体事件。
+3. bot: Bot自身经历的真实独立事件、明确认同的个性/习惯设定、收到的关键契约或重大生活足迹。
+
+操作类型判断规则：
+- ADD: 首次获知的新事实、新偏好或新经历。
+- UPDATE: 某个之前已知的事实发生了明确变化或更正（例如用户更新了所在地、改变了作息、或者计划有了新进展）。
+- DELETE: 之前的事实被明确撤销、否定或彻底失效。
+
+输出格式要求：
+严格返回一个标准的 JSON 数组，数组中每个对象包含以下字段：
+- "action": "ADD" | "UPDATE" | "DELETE"
+- "target_type": "user" | "bot" | "group"
+- "target_id": 实体的唯一标识（该群友的QQ号/ID，群号，若是Bot自身则固定为 "global"）
+- "target_name": 实体名称（群友昵称、群名称，或Bot名字）
+- "category": 事实分类，如 "profile"（档案）, "preference"（喜好偏好）, "habit"（习惯作息）, "plan"（近期计划）, "milestone"（重大事件/经历）, "relationship"（人际契约）
+- "content": 精炼准确的客观事实陈述（必须简明扼要，建议20-60字，禁止废话，不要第一人称口语），如 "阿强是本群管理员，近期在准备计算机考研。"
+
+若对话片段完全为闲聊吹水、无任何值得长期沉淀的事实价值，请返回空数组 []。直接输出 JSON，不要 Markdown 包装或解释。"""
 
 
 class EpisodeArchive:
-    def start(self):
-        """Resume durable indexing/tail timers once the bot event loop is running."""
-        self._kick()
+    """负责会话缓冲、片段分块与 Mem0 原子事实状态机管理"""
 
     def _init_archive(self, config):
-        main = getattr(config.mai_reply, "config", {}) or {}
-        context = main.get("context", {})
-        self._archive_cfg = dict(self.cfg.get("archive", {}))
-        self._archive_cfg.setdefault("private_turns", context.get("user_trigger_turns", 3))
-        self._archive_cfg.setdefault("group_messages", context.get("group_trigger_messages", 10))
-        self._wake = asyncio.Event()
-        if self._db is None:
-            return
-        columns = {row[1] for row in self._db.execute("PRAGMA table_info(memories)")}
-        for column, definition in (("ended", "REAL"), ("participants", "TEXT NOT NULL DEFAULT '[]'")):
-            if column not in columns:
-                self._db.execute(f"ALTER TABLE memories ADD COLUMN {column} {definition}")
-        self._db.executescript("""
-            CREATE TABLE IF NOT EXISTS rag_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL,
-                user_id TEXT NOT NULL, speaker TEXT NOT NULL, role TEXT NOT NULL,
-                content TEXT NOT NULL, created REAL NOT NULL, received REAL NOT NULL,
-                turn_end INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS rag_events_scope ON rag_events(scope,id);
-            CREATE TABLE IF NOT EXISTS rag_receipts (
-                scope TEXT NOT NULL, source TEXT NOT NULL, created REAL NOT NULL,
-                PRIMARY KEY(scope,source)
-            );
-            CREATE TABLE IF NOT EXISTS rag_episode_tail (
-                scope TEXT PRIMARY KEY, events TEXT NOT NULL
-            );
-        """)
-        self._db.commit()
+        self._archive_cfg = self.cfg.get("archive", {})
+        self._buffers: Dict[str, List[Dict[str, Any]]] = {}
+        self._buffer_lock = threading.Lock()
+        self._last_archive_time: Dict[str, float] = {}
 
-    async def remember(self, group_id, user_id, user_name, text, reply="", message_id=None,
-                       bot_name="Bot", timestamp=None):
-        """Compatibility entry: a supplied reply is one completed user/Bot turn."""
-        if reply:
-            return await self.record_turn(group_id, user_id, user_name, text, reply,
-                                          message_id=message_id, bot_name=bot_name, timestamp=timestamp)
-        return await self.observe(group_id, user_id, user_name, text,
-                                  message_id=message_id, timestamp=timestamp)
+        # 加载轻量 LLM (trigger_llm) 配置供 Mem0 抽取事实使用
+        ccfg = getattr(config.mai_reply, "config", {})
+        trig_cfg = ccfg.get("trigger_llm", {}) or {}
+        self._trig_model = str(trig_cfg.get("model", "")).strip() or "qwen3.8-flash"
+        self._trig_base_url = str(trig_cfg.get("base_url", "")).strip().rstrip("/") or "http://api.apollodorus.xyz/v1"
+        self._trig_keys = trig_cfg.get("api_keys", [])
+        if isinstance(self._trig_keys, str):
+            self._trig_keys = [self._trig_keys]
+        self._trig_keys = [k for k in self._trig_keys if k]
 
-    async def observe(self, group_id, user_id, user_name, text, message_id=None,
-                      timestamp=None, role="user"):
-        return await self._record(group_id, user_id, [
-            (role, user_name, text, False),
-        ], message_id, timestamp)
+    def _event(self, speaker_name: str, speaker_id: str, text: str, is_bot: bool, ts: float, message_id: Optional[str] = None) -> Dict[str, Any]:
+        return {
+            "name": str(speaker_name),
+            "id": str(speaker_id),
+            "text": str(text).strip(),
+            "is_bot": bool(is_bot),
+            "ts": float(ts),
+            "message_id": str(message_id) if message_id else None,
+        }
 
-    async def record_turn(self, group_id, user_id, user_name, text, reply,
-                          message_id=None, bot_name="Bot", timestamp=None):
-        # Both halves enter SQLite in one transaction, after a reply was sent.
-        return await self._record(group_id, user_id, [
-            ("user", user_name, text, False), ("assistant", bot_name, reply, True),
-        ], message_id, timestamp)
-
-    async def _record(self, group_id, user_id, items, message_id, timestamp):
+    async def record_turn(
+        self,
+        group_id: Optional[str],
+        user_id: Any,
+        user_name: str,
+        user_text: str,
+        bot_reply: str,
+        bot_name: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ):
         if not self.allowed(group_id):
             return
         now = time.time()
-        created = now if timestamp is None else float(timestamp)
         scope = self.scope_for(group_id, user_id)
-        source = str(message_id) if message_id is not None else uuid.uuid4().hex
-        limit = max(100, int(self.cfg.get("index", {}).get("max_message_chars", 16000)))
-        events = []
-        for role, speaker, text, turn_end in items:
-            if role not in ("user", "assistant") or not isinstance(text, str) or not text.strip():
-                continue
-            text = text.strip()
-            if role == "user" and text.startswith(("/", "#")):
-                continue
-            events.append((role, str(speaker)[:40], text[:limit], int(turn_end)))
-        if not events or (len(items) == 2 and events[0][0] != "user"):
+        bot_label = bot_name or "Bot"
+        events = [
+            self._event(user_name, str(user_id), user_text, is_bot=False, ts=now, message_id=message_id),
+            self._event(bot_label, "bot", bot_reply, is_bot=True, ts=now + 0.1),
+        ]
+        self._append_events(scope, events, is_group=(group_id is not None), group_id=group_id, user_id=user_id)
+
+    async def observe(
+        self,
+        group_id: Optional[str],
+        user_id: Any,
+        user_name: str,
+        user_text: str,
+        message_id: Optional[str] = None,
+    ):
+        if not self.allowed(group_id):
             return
-        generation = self._generation
-
-        def insert(db):
-            if generation != self._generation:
-                return 0, 0, 0
-            inserted = 0
-            for role, speaker, content, turn_end in events:
-                receipt = f"{role}:{user_id}:{source}"
-                if db.execute("INSERT OR IGNORE INTO rag_receipts VALUES(?,?,?)", (scope, receipt, now)).rowcount:
-                    db.execute("""INSERT INTO rag_events(scope,user_id,speaker,role,content,created,received,turn_end)
-                                  VALUES(?,?,?,?,?,?,?,?)""",
-                               (scope, str(user_id), speaker, role, content, created, now, turn_end))
-                    inserted += 1
-            # Bound raw buffering too, including scopes that only receive Bot
-            # messages. Expired receipts are removed along with old raw events.
-            cutoff = now - max(1, int(self.cfg.get('retention', {}).get('days', 365))) * 86400
-            db.execute('DELETE FROM rag_events WHERE received<?', (cutoff,))
-            db.execute('DELETE FROM rag_receipts WHERE created<?', (cutoff,))
-            raw_limit = max(20, int(self._archive_cfg.get('max_buffer_messages', 200)))
-            db.execute('''DELETE FROM rag_events WHERE scope=? AND id NOT IN
-                          (SELECT id FROM rag_events WHERE scope=? ORDER BY id DESC LIMIT ?)''',
-                       (scope, scope, raw_limit))
-            count, turns = db.execute("SELECT COUNT(*),COALESCE(SUM(turn_end),0) FROM rag_events WHERE scope=?",
-                                      (scope,)).fetchone()
-            return inserted, count, turns
-        try:
-            inserted, count, turns = await asyncio.to_thread(self._run_db, insert)
-            #if inserted:
-                #self._log("[MaiReply RAG] 缓冲 scope=%s 新增=%d 消息 待归档=%d 完成轮数=%d（未逐条调用embedding）",scope, inserted, count, turns)
-            self._kick()
-        except Exception as exc:
-            self._warn("消息缓冲失败", exc)
-
-    @staticmethod
-    def _event(row):
-        return {"user_id": row[1], "speaker": row[2], "role": row[3],
-                "content": row[4], "created": row[5]}
-
-    def _scope_allowed(self, scope):
-        if scope.startswith("group:"):
-            return self.allowed(scope.split(":", 1)[1])
-        return self.allowed(None)
-
-    def _archive_due(self, db, force=False):
+        gcfg = self.cfg.get("group", {})
+        if group_id is not None and not gcfg.get("observe_untriggered", True):
+            return
         now = time.time()
-        scopes = db.execute("""SELECT scope,COUNT(*),COALESCE(SUM(turn_end),0),
-                              SUM(CASE WHEN role='user' THEN 1 ELSE 0 END),SUM(LENGTH(content)),MAX(received)
-                              FROM rag_events GROUP BY scope""").fetchall()
-        written = 0
-        for scope, count, turns, humans, chars, last in scopes:
-            if not self._scope_allowed(scope):
-                continue
-            group = scope.startswith("group:")
-            threshold = max(1, int(self._archive_cfg.get("group_messages" if group else "private_turns", 10 if group else 3)))
-            idle = float(self._archive_cfg.get("idle_seconds", 600))
-            size_limit = max(100, int(self._archive_cfg.get("max_buffer_chars", 6000)))
-            if not (force or (humans if group else turns) >= threshold or chars >= size_limit
-                    or (idle > 0 and now - last >= idle)):
-                continue
-            rows = db.execute("SELECT id,user_id,speaker,role,content,created FROM rag_events WHERE scope=? ORDER BY id",
-                              (scope,)).fetchall()
-            events = [self._event(row) for row in rows]
-            # Bot-only proactive messages are kept for context until a human joins.
-            if not any(event["role"] == "user" for event in events):
-                continue
-            tail_row = db.execute("SELECT events FROM rag_episode_tail WHERE scope=?", (scope,)).fetchone()
-            tail = json.loads(tail_row[0]) if tail_row else []
-            overlap = max(0, min(4, int(self._archive_cfg.get("overlap_messages", 2))))
-            # Do not attach a months-old tail to a new conversation.
-            gap = float(self._archive_cfg.get("context_gap_seconds", 1800))
-            if tail and abs(events[0]["created"] - tail[-1]["created"]) > gap:
-                tail = []
-            combined = tail[-overlap:] + events if overlap else events
-            episode_id = uuid.uuid4().hex
-            chunks = self._episode_chunks(combined)
-            for index, messages in enumerate(chunks):
-                start, end = min(e["created"] for e in messages), max(e["created"] for e in messages)
-                participants = sorted({e["user_id"] for e in messages if e["role"] == "user"})
-                human_text = "\n".join(e["content"] for e in messages if e["role"] == "user")
-                document = {"version": 2, "episode": episode_id, "start": start, "end": end,
-                            "topics": topic_labels(human_text), "messages": messages}
-                owner = scope.split(":", 1)[1] if not group else "*"
-                db.execute("""INSERT INTO memories(scope,user_id,source,text,created,ended,participants)
-                              VALUES(?,?,?,?,?,?,?)""", (scope, owner, f"episode:{episode_id}:{index}",
-                              json.dumps(document, ensure_ascii=False), start, end, json.dumps(participants)))
-                written += 1
-            # Raw buffer and episode creation commit together; no data is lost on restart.
-            db.execute("DELETE FROM rag_events WHERE scope=? AND id<=?", (scope, rows[-1][0]))
-            db.execute("INSERT OR REPLACE INTO rag_episode_tail VALUES(?,?)",
-                       (scope, json.dumps(events[-overlap:] if overlap else [], ensure_ascii=False)))
-            self._prune(db, scope, now)
-            self._log("[MaiReply RAG] 对话归档 scope=%s 消息=%d 用户消息=%d 完成轮数=%d 向量片段=%d",
-                      scope, count, humans, turns, len(chunks))
-        return written
+        scope = self.scope_for(group_id, user_id)
+        events = [self._event(user_name, str(user_id), user_text, is_bot=False, ts=now, message_id=message_id)]
+        self._append_events(scope, events, is_group=(group_id is not None), group_id=group_id, user_id=user_id)
 
-    def _episode_chunks(self, events):
-        limit = max(300, int(self._archive_cfg.get("chunk_chars", 1800)))
-        result, chunk = [], []
-        # Keep each short human/Bot exchange together whenever it fits.
-        for event in events:
-            for offset in range(0, len(event["content"]), max(100, limit - 250)):
-                piece = {**event, "content": event["content"][offset:offset + max(100, limit - 250)]}
-                if chunk and len(json.dumps(chunk + [piece], ensure_ascii=False)) > limit:
-                    result.append(chunk)
-                    # Carry one preceding message to ground short answers in the next chunk.
-                    chunk = chunk[-1:] if len(json.dumps(chunk[-1:], ensure_ascii=False)) < limit // 3 else []
-                chunk.append(piece)
-        if chunk:
-            result.append(chunk)
-        return result
+    def _append_events(self, scope: str, events: List[Dict[str, Any]], is_group: bool, group_id: Optional[str], user_id: Any):
+        with self._buffer_lock:
+            buf = self._buffers.setdefault(scope, [])
+            buf.extend(events)
+            max_buf = int(self._archive_cfg.get("max_buffer_messages", 200))
+            if len(buf) > max_buf:
+                del buf[:-max_buf]
 
-    def _prune(self, db, scope, now):
-        cfg = self.cfg.get("retention", {})
-        cutoff = now - max(1, int(cfg.get("days", 365))) * 86400
-        db.execute("DELETE FROM memories WHERE COALESCE(ended,created)<?", (cutoff,))
-        db.execute("DELETE FROM rag_receipts WHERE created<?", (cutoff,))
-        maximum = max(1, int(cfg.get("max_per_scope", 4000)))
-        db.execute("""DELETE FROM memories WHERE scope=? AND id NOT IN
-                      (SELECT id FROM memories WHERE scope=? ORDER BY COALESCE(ended,created) DESC,id DESC LIMIT ?)""",
-                   (scope, scope, maximum))
-        pending = max(1, int(self.cfg.get("index", {}).get("max_pending", 10000)))
-        db.execute("""DELETE FROM memories WHERE (vector IS NULL OR namespace != ?) AND id NOT IN
-                      (SELECT id FROM memories WHERE vector IS NULL OR namespace != ? ORDER BY id DESC LIMIT ?)""",
-                   (self._namespace, self._namespace, pending))
+            due = self._archive_due(scope, buf, is_group)
 
-    def _kick(self):
-        if self.enable and not self._closed:
-            self._wake.set()
-            if self._worker is None or self._worker.done():
-                self._worker = asyncio.create_task(self._index_loop(), name="mai-rag-episodes")
+        if due:
+            asyncio.create_task(self._flush_archive(scope, is_group, group_id, user_id))
 
-    def _pending(self, db, limit=None):
-        rows = db.execute("SELECT id,text,scope FROM memories WHERE vector IS NULL OR namespace != ? ORDER BY id",
-                          (self._namespace,)).fetchall()
-        rows = [row for row in rows if self._scope_allowed(row[2])]
-        return rows if limit is None else rows[:limit]
+    def _archive_due(self, scope: str, buf: List[Dict[str, Any]], is_group: bool) -> bool:
+        if not buf:
+            return False
+        if is_group:
+            trigger_msgs = int(self._archive_cfg.get("group_messages", 10))
+            user_count = sum(1 for e in buf if not e["is_bot"])
+            if user_count >= trigger_msgs:
+                return True
+        else:
+            trigger_turns = int(self._archive_cfg.get("private_turns", 3))
+            bot_count = sum(1 for e in buf if e["is_bot"])
+            if bot_count >= trigger_turns:
+                return True
 
-    @staticmethod
-    def _embedding_text(raw):
-        document = json.loads(raw)
-        if document.get("version") != 2:
-            return raw
-        # Keep rich metadata in SQLite; avoid repeating JSON keys/timestamps in
-        # every embedding input. All actual human/Bot utterances are retained.
-        stamp = lambda value: datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M")
-        lines = [f"对话时间 {stamp(document['start'])} 至 {stamp(document['end'])}"]
-        if document.get("topics"):
-            lines.append("相关话题 " + "; ".join(document["topics"]))
-        for event in document["messages"]:
-            label = (f"{event['speaker']}[user;ID:{event['user_id']}]" if event["role"] == "user" else
-                     f"Bot[assistant;回复ID:{event['user_id']}]")
-            lines.append(label + ": " + event["content"])
-        return "\n".join(lines)
+        # 超时补归档
+        idle_seconds = float(self._archive_cfg.get("idle_seconds", 600.0))
+        if idle_seconds > 0 and len(buf) >= 2:
+            last_time = self._last_archive_time.get(scope, 0.0)
+            if time.time() - last_time > idle_seconds:
+                return True
+        return False
 
-    async def _index_loop(self):
-        batch = max(1, min(100, int(self.cfg.get("index", {}).get("batch_size", 16))))
-        retry = max(1, float(self.cfg.get("index", {}).get("retry_seconds", 60)))
-        while not self._closed:
-            self._wake.clear()
-            try:
-                await asyncio.to_thread(self._run_db, self._archive_due)
-                rows = await asyncio.to_thread(self._run_db, self._pending, batch)
-                if rows and time.monotonic() >= self._cooldown:
-                    started = time.monotonic()
-                    self._log("[MaiReply RAG] 索引开始 provider=%s 本批=%d 对话片段", self._provider, len(rows))
-                    vectors = await self._embed([self._embedding_text(row[1]) for row in rows])
-                    def save(db):
-                        return db.executemany("UPDATE memories SET vector=?,namespace=? WHERE id=? AND text=?",
-                                              [(v.tobytes(), self._namespace, row[0], row[1]) for row, v in zip(rows, vectors)]).rowcount
-                    saved = await asyncio.to_thread(self._run_db, save)
-                    self._log("[MaiReply RAG] 索引完成 写入=%d 维度=%d 耗时=%.2fs",
-                              saved or 0, vectors[0].size, time.monotonic() - started)
-                    continue
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._cooldown = time.monotonic() + retry
-                self._warn("归档或索引失败，持久化队列等待重试", exc)
-            idle = float(self._archive_cfg.get("idle_seconds", 600))
-            delay = min(30, idle) if idle > 0 else 30
-            if time.monotonic() < self._cooldown:
-                delay = min(delay, self._cooldown - time.monotonic())
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=max(0.02, delay))
-            except asyncio.TimeoutError:
-                pass
+    async def _flush_archive(self, scope: str, is_group: bool, group_id: Optional[str], user_id: Any):
+        with self._buffer_lock:
+            buf = list(self._buffers.get(scope, []))
+            self._buffers[scope] = []
+            self._last_archive_time[scope] = time.time()
 
-    async def flush(self, force=False):
-        """Explicit flushing is useful for maintenance/tests; normal traffic uses thresholds."""
-        if not self.enable or self._closed:
-            return 0
-        count = await asyncio.to_thread(self._run_db, self._archive_due, force)
-        self._kick()
-        return count
-
-    async def wait_idle(self, timeout=10):
-        """Wait for currently eligible episodes, without forcing a partial conversation."""
-        if not self.enable or self._closed:
+        if not buf:
             return
-        await self.flush()
-        async def wait():
-            while await asyncio.to_thread(self._run_db, self._pending):
-                await asyncio.sleep(0.01)
-        await asyncio.wait_for(wait(), timeout)
 
-    def _recent_events(self, db, scope, limit=12):
-        rows = db.execute("""SELECT id,user_id,speaker,role,content,created FROM rag_events
-                              WHERE scope=? ORDER BY id DESC LIMIT ?""", (scope, limit)).fetchall()
-        return [self._event(row) for row in reversed(rows)]
+        now = time.time()
+        # 1. 保存对话片段 (fact_type='episode')
+        chunk_lines = []
+        for e in buf:
+            chunk_lines.append(f"{e['name']}: {e['text']}")
+        episode_text = "\n".join(chunk_lines)
+
+        def save_episode(db):
+            db.execute("""
+                INSERT INTO memories (
+                    scope, text, created, ended, user_id, message_id, namespace,
+                    fact_type, category, target_id, target_name, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'episode', 'conversation', ?, ?, ?)
+            """, (
+                scope, episode_text, buf[0]["ts"], buf[-1]["ts"],
+                str(user_id) if user_id else None,
+                buf[-1].get("message_id"),
+                self._namespace,
+                str(group_id) if is_group else str(user_id),
+                f"群{group_id}" if is_group else "私聊",
+                now
+            ))
+
+        try:
+            self._run_db(save_episode)
+        except Exception as exc:
+            self._warn("[MaiReply RAG] 保存历史片段失败: %s", exc)
+
+        # 2. 异步调用 trigger_llm 执行 Mem0 原子事实抽取与状态机更新
+        try:
+            await self._extract_and_apply_mem0(scope, buf, is_group, group_id, user_id)
+        except Exception as exc:
+            self._warn("[MaiReply RAG] Mem0 抽取事实异常 (%s): %s", type(exc).__name__, exc)
+
+    async def _extract_and_apply_mem0(self, scope: str, buf: List[Dict[str, Any]], is_group: bool, group_id: Optional[str], user_id: Any):
+        facts = await self._extract_facts_llm(buf, is_group, group_id, user_id)
+        if not facts:
+            return
+
+        now = time.time()
+        def apply_all(db):
+            for fact in facts:
+                # 确定该事实归属的存储范围
+                target_type = str(fact.get("target_type", "user")).lower()
+                target_id = str(fact.get("target_id", "")).strip()
+                if target_type == "user":
+                    fact_scope = f"user:{target_id}" if target_id else (f"user:{user_id}" if user_id else scope)
+                elif target_type == "bot":
+                    fact_scope = "agent:global"
+                elif target_type == "group":
+                    fact_scope = f"group:{target_id}" if target_id else (f"group:{group_id}" if group_id else scope)
+                else:
+                    fact_scope = scope
+
+                self._apply_mem0_fact(db, fact, fact_scope, now)
+
+        self._run_db(apply_all)
+
+    async def _extract_facts_llm(self, buf: List[Dict[str, Any]], is_group: bool, group_id: Optional[str], user_id: Any) -> List[Dict[str, Any]]:
+        # 组装对话上下文
+        dialog_lines = []
+        for e in buf:
+            dialog_lines.append(f"[{e['name']} (ID:{e['id']})]: {e['text']}")
+        conv_text = "\n".join(dialog_lines)
+
+        user_prompt = f"""当前对话场景：{'群聊 (群号:' + str(group_id) + ')' if is_group else '私聊 (用户ID:' + str(user_id) + ')'}
+对话内容：
+{conv_text}
+
+请提取原子事实（JSON 格式）："""
+
+        headers = {"Content-Type": "application/json"}
+        if self._trig_keys:
+            headers["Authorization"] = f"Bearer {self._trig_keys[0]}"
+
+        url = f"{self._trig_base_url}/chat/completions"
+        payload = {
+            "model": self._trig_model,
+            "messages": [
+                {"role": "system", "content": FACT_EXTRACT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 800
+        }
+
+        content = ""
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        content = resp.json()["choices"][0]["message"]["content"].strip()
+                        break
+                    else:
+                        self._warn(f"[MaiReply RAG] trigger_llm 请求失败 HTTP {resp.status_code} (尝试 {attempt+1}/2)")
+            except Exception as exc:
+                self._warn(f"[MaiReply RAG] trigger_llm 网络异常 ({type(exc).__name__}) (尝试 {attempt+1}/2): {exc}")
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
+        if not content:
+            return []
+
+        # 解析 JSON
+        clean_json = re.sub(r"^```(?:json)?\s*", "", content, flags=re.MULTILINE)
+        clean_json = re.sub(r"\s*```$", "", clean_json, flags=re.MULTILINE).strip()
+        try:
+            facts = json.loads(clean_json)
+            if isinstance(facts, list):
+                return facts
+        except Exception:
+            # 尝试正则提取 JSON array
+            m = re.search(r"\[.*\]", clean_json, re.DOTALL)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except Exception:
+                    pass
+        return []
+
+    def _apply_mem0_fact(self, db, fact: Dict[str, Any], fact_scope: str, now: float):
+        action = str(fact.get("action", "ADD")).upper().strip()
+        content = str(fact.get("content", "")).strip()
+        if not content:
+            return
+
+        target_id = str(fact.get("target_id", "")).strip()
+        target_name = str(fact.get("target_name", "")).strip()
+        category = str(fact.get("category", "general")).strip()
+        target_type = str(fact.get("target_type", "user")).strip()
+
+        if action == "ADD":
+            # 查找同 scope、同 target、同 category 是否已有相似事实
+            row = db.execute("""
+                SELECT id, text FROM memories
+                WHERE scope=? AND target_id=? AND category=? AND fact_type='fact' AND ended IS NULL
+                ORDER BY id DESC LIMIT 1
+            """, (fact_scope, target_id, category)).fetchone()
+
+            if row:
+                # 若已有同类事实，做语义合并更新
+                updated_text = f"{content}"
+                db.execute("""
+                    UPDATE memories SET text=?, updated_at=?, vector=NULL
+                    WHERE id=?
+                """, (updated_text, now, row[0]))
+                self._log("[MaiReply RAG] Mem0 合并更新事实 scope=%s target=%s: %s", fact_scope, target_name, content)
+            else:
+                db.execute("""
+                    INSERT INTO memories (
+                        scope, text, created, ended, user_id, namespace,
+                        fact_type, category, target_id, target_name, updated_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?, 'fact', ?, ?, ?, ?)
+                """, (fact_scope, content, now, target_id, self._namespace, category, target_id, target_name, now))
+                self._log("[MaiReply RAG] Mem0 新增事实 scope=%s target=%s: %s", fact_scope, target_name, content)
+
+        elif action == "UPDATE":
+            row = db.execute("""
+                SELECT id FROM memories
+                WHERE scope=? AND target_id=? AND fact_type='fact' AND ended IS NULL
+                ORDER BY id DESC LIMIT 1
+            """, (fact_scope, target_id)).fetchone()
+
+            if row:
+                db.execute("""
+                    UPDATE memories SET text=?, updated_at=?, vector=NULL
+                    WHERE id=?
+                """, (content, now, row[0]))
+                self._log("[MaiReply RAG] Mem0 更新事实 scope=%s target=%s: %s", fact_scope, target_name, content)
+            else:
+                db.execute("""
+                    INSERT INTO memories (
+                        scope, text, created, ended, user_id, namespace,
+                        fact_type, category, target_id, target_name, updated_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?, 'fact', ?, ?, ?, ?)
+                """, (fact_scope, content, now, target_id, self._namespace, category, target_id, target_name, now))
+
+        elif action == "DELETE":
+            db.execute("""
+                UPDATE memories SET ended=?
+                WHERE scope=? AND target_id=? AND fact_type='fact' AND ended IS NULL
+            """, (now, fact_scope, target_id))
+            self._log("[MaiReply RAG] Mem0 失效事实 scope=%s target=%s", fact_scope, target_name)
+
+    def _pending(self, db, limit: int = 16):
+        return db.execute("""
+            SELECT id, text, scope, fact_type FROM memories
+            WHERE vector IS NULL AND namespace=?
+            ORDER BY id ASC LIMIT ?
+        """, (self._namespace, limit)).fetchall()
+
+    def _embedding_text(self, text: str, fact_type: str = "episode") -> str:
+        inst = str(self._embedding_cfg.get("query_instruction", "")).strip()
+        if fact_type == "fact":
+            return f"事实记忆: {text}"
+        return f"{inst}: {text}" if inst else text
+
+    def _recent_events(self, db, scope: str, limit: int = 6):
+        return db.execute("""
+            SELECT text, created FROM memories
+            WHERE scope=? AND namespace=?
+            ORDER BY COALESCE(ended, created) DESC, id DESC LIMIT ?
+        """, (scope, self._namespace, limit)).fetchall()
