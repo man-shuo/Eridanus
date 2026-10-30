@@ -116,6 +116,7 @@ class ReplyEngine:
         self._tools = self._load_tools()
         self._last_disabled = frozenset()  # 上次过滤所用的禁用集合，仅用于变更时打日志
         self.emotion.random_drift()
+        self._initialized = True
 
     # --------------------------------------------------
     # 名称缓存辅助
