@@ -627,7 +627,7 @@ class TTS:
                 **kwargs,
             )
             await bot.send(event, Record(file=path))
-            return {"status": "success", "audio": path}
+
         except Exception as e:
             logger.error(f"[call_tts] 合成或发送失败: {e}", exc_info=True)
             return {"status": "failed", "error": str(e)}
@@ -665,7 +665,7 @@ class TTS:
 _default_tts = TTS()
 
 
-async def call_tts(
+async def tts(
     bot,
     event,
     config,
