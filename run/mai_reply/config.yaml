@@ -1,4 +1,3 @@
-
 enable: True  # 开启后将自动禁用旧版ai回复
 llm:
   provider: openai  #接口类型
@@ -61,9 +60,9 @@ context: # 上下文相关配置
   max_turns: 20   # 每个会话保存的最大消息轮数（一来一回=1轮）
   group_context_window: 15   # 群聊上下文：读取群内最近N条消息作为旁观上下文（让bot感知群聊气氛）
   session_ttl: 7200      # 2小时   # Redis TTL（秒）。会话历史缓存存活时间
-  # 记忆体系模式选择与群生态槽位配置：当两者都启用时，可自行选择 ( "slots" | "impression" | "both")
-  user_memory_mode: "slots"    # 用户记忆模式：slots(槽位事实)、impression(主观印象)、both(两者兼备)。若设为slots且开了impression，系统视同impression关闭以节省API token并出warning
-  group_memory_mode: "slots"   # 群聊记忆模式：slots(群生态10槽位)、impression(群整体印象)、both(两者兼备)。若设为slots且开了群印象，同理视同群印象关闭以节省token
+
+  user_memory_mode: "slots"    # 用户记忆模式：slots(槽位事实)、impression(主观印象)、both(两者兼备)、none(都不用)。若设为slots且开了impression，系统视同impression关闭以节省API token并出warning
+  group_memory_mode: "slots"   # 群聊记忆模式：slots(群生态10槽位)、impression(群整体印象)、both(两者兼备)、none(都不用)。若设为slots且开了群印象，同理视同群印象关闭以节省token
   group_memory_whitelist_enabled: true # 群聊记忆是否启用白名单模式。true=白名单模式（仅白名单群触发群生态槽位/群印象）；false=全局模式（对所有群生效）
   group_memory_whitelist: []            # 群聊记忆白名单群号列表。若开启了白名单模式但此处为[]，将自动使用trigger_llm配置的whitelist
   user_trigger_turns: 3               # 用户记忆更新间隔（无论是槽位事实还是主观印象，每进行几轮对话触发一次更新，默认3轮）
