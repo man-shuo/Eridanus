@@ -10,8 +10,8 @@ breeze_tts:
   direct_url: ""
   api_key: ""
   mode: "breeze_tts"  # 接口模式: "breeze_tts" 或 "openai_speech"  /breeze/tts或/v1/audio/speech
-  auto_generate_instruction: true # 自动生成 instruction 开关: 由 trigger_llm 结合文本与情绪自动生成语气指导语
-  auto_add_audio_tags: false # 自动添加音频表现力标签开关: 由 trigger_llm 自动在台词中适度添加 [叹气]、[轻笑] 等表现力标签
+  auto_generate_instruction: false # 自动生成 instruction 开关: 由 trigger_llm 结合文本与情绪自动生成语气指导语
+  auto_add_audio_tags: true # 自动添加音频表现力标签开关: 由 trigger_llm 自动在台词中适度添加 [叹气]、[轻笑] 等表现力标签
   default_instruction: "轻柔，温和，慵懒，俏皮"   # 默认配音语气指导语 (当未显式指定且自动生成关闭或失败时使用)
 
   cfg_scale: 4.0      # 带指导语/声音设计时推荐 4.0，无指导语时自动 1.0
